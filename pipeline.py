@@ -11,6 +11,9 @@ import os
 
 # --- CONSTANTS ---
 PIXEL_TO_METER = 0.05
+BASE_RESOLUTION = 512
+MAX_DIM = 4096  # Safety clamp for RAM
+
 WALL_HEIGHT = 2.5
 DOOR_HEIGHT = 2.1
 HEADER_SIZE = WALL_HEIGHT - DOOR_HEIGHT
@@ -30,9 +33,93 @@ def load_model_logic(model_path, device):
     model.eval()
     return model
 
+# --- PHASE 4: TILED INFERENCE ENGINE ---
+def get_weight_map(tile_size):
+    """Generates a Hann window weight map to blend tile seams smoothly."""
+    window = np.hanning(tile_size)
+    weight_map = np.outer(window, window)
+    return weight_map
+
+# --- IN PIPELINE.PY ---
+
+def predict_tiled(model, device, image, tile_size=512, overlap=0.5, progress_callback=None):
+    """
+    High-Fidelity Inference with weighted stitching.
+    Includes smart fallback for small images.
+    """
+    h, w = image.shape[:2]
+    
+    # 1. EARLY EXIT: If image is smaller than a tile, DON'T tile.
+    # This prevents Hann window artifacts on small inputs.
+    if h <= tile_size and w <= tile_size:
+        if progress_callback: progress_callback(1.0)
+        return predict_mask(model, device, image)
+    
+    # 2. RAM Safety Check (Downscale massive images)
+    if max(h, w) > MAX_DIM:
+        scale = MAX_DIM / max(h, w)
+        new_w, new_h = int(w * scale), int(h * scale)
+        image = cv2.resize(image, (new_w, new_h))
+        h, w = new_h, new_w
+    
+    # 3. Setup Stride & Canvas
+    stride = int(tile_size * (1 - overlap))
+    full_mask = np.zeros((h, w), dtype=np.float32)
+    count_mask = np.zeros((h, w), dtype=np.float32)
+    weight_map = get_weight_map(tile_size)
+    
+    # 4. Calculate Tiles
+    y_starts = range(0, h, stride)
+    x_starts = range(0, w, stride)
+    total_tiles = len(y_starts) * len(x_starts)
+    processed_tiles = 0
+    
+    # 5. Tile Loop
+    for y in y_starts:
+        for x in x_starts:
+            y1 = min(h, y + tile_size)
+            x1 = min(w, x + tile_size)
+            y0 = max(0, y1 - tile_size)
+            x0 = max(0, x1 - tile_size)
+            
+            tile = image[y0:y1, x0:x1]
+            
+            # Padding
+            pad_h = tile_size - tile.shape[0]
+            pad_w = tile_size - tile.shape[1]
+            if pad_h > 0 or pad_w > 0:
+                tile = cv2.copyMakeBorder(tile, 0, pad_h, 0, pad_w, cv2.BORDER_CONSTANT, value=[0,0,0])
+            
+            # Predict
+            t = tile.astype(np.float32) / 255.0
+            mean = np.array([0.485, 0.456, 0.406])
+            std = np.array([0.229, 0.224, 0.225])
+            t = (t - mean) / std
+            t = torch.from_numpy(t.transpose(2,0,1)).unsqueeze(0).float().to(device)
+            
+            with torch.no_grad():
+                pred = model(t).sigmoid().cpu().numpy().squeeze()
+            
+            # Crop & Accumulate
+            valid_h = tile_size - pad_h
+            valid_w = tile_size - pad_w
+            pred = pred[:valid_h, :valid_w]
+            current_weights = weight_map[:valid_h, :valid_w]
+            
+            full_mask[y0:y1, x0:x1] += pred * current_weights
+            count_mask[y0:y1, x0:x1] += current_weights
+            
+            processed_tiles += 1
+            if progress_callback:
+                progress_callback(processed_tiles / total_tiles)
+
+    # 6. Normalize
+    np.place(count_mask, count_mask == 0, 1.0)
+    final_mask = full_mask / count_mask
+    return final_mask
+
 def predict_mask(model, device, image):
-    """Phase 1: Perception - Raw Inference with Aspect Ratio Padding."""
-    # Preprocess with padding
+    """Fast Inference (512px). Non-metric preview."""
     h, w = image.shape[:2]
     scale = 512 / max(h, w)
     new_w, new_h = int(w * scale), int(h * scale)
@@ -55,15 +142,13 @@ def predict_mask(model, device, image):
     return mask
 
 def process_geometry(mask):
-    """Phase 2: Drafting - Skeletonization & Vectorization."""
+    """Phase 2: Drafting."""
     binary_mask = (mask > 0.5).astype(np.uint8) * 255
-    # Adaptive morphology
     k_size = 3
     kernel = np.ones((k_size, k_size), np.uint8)
     closed_mask = cv2.morphologyEx(binary_mask, cv2.MORPH_CLOSE, kernel)
     skeleton = skeletonize(closed_mask > 0).astype(np.uint8)
     
-    # Graph Build
     y, x = np.where(skeleton > 0)
     points = list(zip(x, y))
     points_set = set(points)
@@ -77,7 +162,6 @@ def process_geometry(mask):
             if neighbor in points_set and (u, v) < neighbor:
                 G.add_edge((u, v), neighbor, weight=1.0)
     
-    # Vectorize
     junctions = [n for n in G.nodes() if G.degree(n) != 2 and G.degree(n) > 0]
     if not junctions and len(G) > 0: junctions = [list(G.nodes())[0]]
     
@@ -103,7 +187,6 @@ def process_geometry(mask):
                 simple = rdp(path, epsilon=EPSILON)
                 for i in range(len(simple)-1): vectors.append((simple[i], simple[i+1]))
     
-    # Prune
     final_vectors = []
     seen = set()
     for p1, p2 in vectors:
@@ -133,13 +216,14 @@ def are_collinear(p1, p2, p3, p4, tol=0.95):
     return abs(np.dot(v1, v2) / (n1 * n2)) > tol
 
 def generate_3d_scene(vectors):
-    """Phase 3: Construction - Walls, Headers, and Floor."""
+    """Phase 3: Construction."""
     scene_meshes = []
     scaled_vectors = []
     
     # Walls
     for p1, p2 in vectors:
-        s_p1, s_p2 = np.array(p1) * PIXEL_TO_METER, np.array(p2) * PIXEL_TO_METER
+        s_p1 = np.array(p1) * PIXEL_TO_METER
+        s_p2 = np.array(p2) * PIXEL_TO_METER
         scaled_vectors.append((s_p1, s_p2))
         wall = create_box(s_p1, s_p2, WALL_THICKNESS, WALL_HEIGHT)
         if wall:
@@ -156,8 +240,8 @@ def generate_3d_scene(vectors):
             d = np.linalg.norm(np.array(p1)-np.array(p2))
             if d < min_dist: min_dist, best_pair = d, (p1, p2)
         
+        # Check against architectural standard (1.2m)
         if 0.6 < min_dist < DOOR_WIDTH_MAX:
-             # Check collinearity using original unscaled vectors
             orig_w1_s, orig_w1_e = vectors[i]
             orig_w2_s, orig_w2_e = vectors[j]
             if are_collinear(orig_w1_s, orig_w1_e, orig_w2_s, orig_w2_e):
@@ -165,8 +249,6 @@ def generate_3d_scene(vectors):
                 if header:
                     header.visual.face_colors = [200, 200, 200, 255]
                     scene_meshes.append(header)
-    
-    # ... (previous code inside generate_3d_scene) ...
     
     # Floor
     if scaled_vectors:
@@ -182,10 +264,8 @@ def generate_3d_scene(vectors):
     if not scene_meshes:
         return None
 
-    # --- FIX: ROTATE TO Y-UP FOR WEB VIEWING ---
+    # FIX: Rotate to Y-Up for Web Viewer
     combined_mesh = trimesh.util.concatenate(scene_meshes)
-    
-    # Rotate -90 degrees around the X-axis
     rotation = trimesh.transformations.rotation_matrix(-np.pi/2, [1, 0, 0])
     combined_mesh.apply_transform(rotation)
     
