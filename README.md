@@ -1,271 +1,257 @@
-# 🏗️ Scan-to-BIM
+# Scan-to-BIM
 
-**AI-Driven Floorplan → BIM-Grade 3D Reconstruction**
+**AI-Driven 2D Floorplan to BIM-Grade 3D Reconstruction**
 
-This project implements a **research-grade Scan-to-BIM pipeline** that converts a **2D architectural floorplan** into a **metric-scaled, editable 3D building model (GLB)** using deep learning, computational geometry, and raster-to-vector conversion.
+This project implements a **research-oriented Scan-to-BIM pipeline** that converts a **2D architectural floorplan image** into a **metric-scaled, editable 3D building model (GLB)** using deep learning, computational geometry, and raster-to-vector reconstruction.
 
-Unlike mesh generators, this system reconstructs **architectural geometry**:
-walls, doors, topology, and scale.
+Unlike mesh-based visualizers, the system reconstructs **architectural structure**—walls, doors, topology, and scale—suitable for BIM-style downstream use.
 
 ---
 
-## 🔥 What This Project Does
+## Project Objective
 
-**Input**
+### Input
+
 A raster floorplan image (PNG / JPG)
 
-**Output**
-A **true-scale BIM-style 3D model** with:
+### Output
 
-* Walls as solids
+A **metric-scale 3D building model** containing:
+
+* Walls represented as solids
 * Door openings with headers (lintels)
 * Floor slab
-* Correct metric dimensions
-* Exportable `.glb`
-* Interactive browser viewer
+* Consistent pixel-to-meter scaling
+* Exportable `.glb` model
+* Interactive browser-based visualization
 
-This is a **geometry reconstruction engine**, not a visualizer.
+The system focuses on **geometric reconstruction**, not surface visualization.
 
 ---
 
-## 🧠 System Architecture
+## System Architecture
 
 ```
 Floorplan Image
       │
       ▼
-[ Phase 1 ]  CNN → Wall Probability Map
+[ Phase 1 ]  CNN-Based Wall Probability Estimation
       │
       ▼
-[ Phase 4 ]  Tiled High-Res Mask Generation
+[ Phase 4 ]  High-Resolution Mask Generation
       │
       ▼
-[ Phase 5 ]  Raster → Vector Geometry
+[ Phase 5 ]  Raster-to-Vector Geometry Extraction
       │
       ▼
-[ Phase 3 ]  Procedural BIM Construction
+[ Phase 3 ]  Procedural BIM-Style Construction
       │
       ▼
-     GLB 3D Building
+     GLB 3D Building Model
 ```
 
-Each phase is modular and independently upgradable.
+Each phase is modular and independently extensible.
 
 ---
 
-# 🧩 Phase Breakdown
+## Phase Overview
 
 ---
 
-## **Phase 1 — Perception (Deep Learning)**
+### Phase 1 — Perception (Deep Learning)
 
-**Status: Implemented**
+**Status:** Implemented
 
-* Model: **UNet (ResNet-34 encoder)**
+* Model: UNet with ResNet-34 encoder
 * Task: Pixel-wise wall probability estimation
-* Output: Floating-point wall probability map
+* Output: Floating-point probability map
 
-Features:
+Key characteristics:
 
 * ImageNet-normalized inference
-* Aspect-ratio preserved resizing
+* Aspect-ratio–preserving resizing
 * GPU-accelerated PyTorch pipeline
 
 ---
 
-## **Phase 4A — High-Resolution Tiled Inference (SAHI-Style)**
+### Phase 4A — High-Resolution Tiled Inference
 
-**Status: Implemented**
+**Status:** Implemented
 
-Solves the “small-CNN vs large-floorplan” problem.
+Addresses the resolution mismatch between fixed-input CNNs and large floorplans.
 
-* Input images are split into **overlapping 512×512 tiles**
-* Each tile is processed by the CNN
-* Outputs are merged using **Hann-window weighted blending**
+* Input images are divided into overlapping 512×512 tiles
+* Each tile is independently processed by the CNN
+* Outputs are merged using Hann-window weighted blending
 
-This preserves:
+This preserves wall continuity and global geometry while maintaining high spatial resolution.
 
-* Wall continuity across tile borders
-* Large building geometry
-* High-resolution detail
-
-Inspired by **SAHI (Slicing Aided Hyper Inference)**.
+This approach is conceptually aligned with SAHI-style inference.
 
 ---
 
-## **Phase 4B — Mask Refinement (Noise & Gap Cleanup)**
+### Phase 4B — Mask Refinement
 
-**Status: Implemented**
+**Status:** Implemented
 
-The raw CNN probability map is cleaned using:
+Post-processing of CNN probability maps to ensure structural integrity before vectorization.
+
+Operations include:
 
 * Hard thresholding
-* Connected-component filtering (dust removal)
-* Morphological closing (gap bridging)
-* Morphological opening (edge smoothing)
+* Connected-component filtering for noise removal
+* Morphological closing to bridge small gaps
+* Morphological opening for edge smoothing
 
-Output:
-
-> A clean, contiguous wall mask suitable for vectorization
+The output is a clean, contiguous wall mask suitable for geometric processing.
 
 ---
 
-## **Phase 5A — Hybrid Raster-to-Vector Conversion**
+### Phase 5A — Hybrid Raster-to-Vector Conversion
 
-**Status: Implemented**
+**Status:** Implemented
 
-This is the core **Scan-to-BIM** step.
+This phase performs the core Scan-to-BIM transformation by combining:
 
-It combines:
+* Skeleton-based topology extraction
+* Pixel-region–based geometric fitting
 
-* **Skeleton topology** → connectivity
-* **Pixel clouds** → geometric accuracy
+Pipeline steps:
 
-Pipeline:
+1. Skeletonization of the refined mask
+2. Conversion of the skeleton into a graph
+3. Tracing of wall paths between junctions
+4. Segmentation at geometric bends using RDP
+5. Extraction of wall pixel regions around each segment
+6. Least-squares (PCA) line fitting on pixel clouds
+7. Generation of CAD-grade wall axes
 
-1. Skeletonize refined mask
-2. Convert skeleton to graph
-3. Trace wall paths
-4. Split at corners using RDP
-5. Extract wall pixel regions around each segment
-6. Fit **least-squares PCA lines** to those pixels
-7. Generate **CAD-grade wall axes**
-
-This produces:
-
-> Straight, metric-accurate, topology-aware wall vectors
+This produces straight, metric-accurate wall vectors while preserving connectivity.
 
 ---
 
-## **Phase 5B — Junction & Topology Optimization**
+### Phase 5B — Junction and Topology Optimization
 
-**Status: To be built**
+**Status:** Planned
 
-Will implement:
+Planned enhancements include:
 
-* Vertex snapping
-* Corner closure
-* Manhattan-world (90°) enforcement
-* Room closure
+* Vertex snapping and corner closure
+* Manhattan-world (orthogonality) enforcement
+* Room boundary closure
 
-Purpose:
-
-> Convert straight lines into a **topologically valid floorplan**
+Objective: to produce a topologically consistent floorplan suitable for semantic reasoning.
 
 ---
 
-## **Phase 3 — BIM-Style 3D Construction**
+### Phase 3 — BIM-Style 3D Construction
 
-**Status: Implemented**
+**Status:** Implemented
 
-Using **Trimesh**, vectors are converted into solids:
+Using Trimesh, vector geometry is converted into 3D architectural solids:
 
-* Pixel → meter scaling
-* Wall extrusion
+* Pixel-to-meter scaling
+* Wall extrusion with thickness and height
 * Door gap detection
 * Header (lintel) generation
-* Floor slab
-* Watertight GLB mesh
+* Floor slab construction
+* Watertight GLB export
 
 ---
 
-## **Phase 6 — Parametric BIM**
+### Phase 6 — Parametric BIM Extensions
 
-**Status: To be built**
+**Status:** Planned
 
-* Editable wall thickness
-* Door sizes
-* IFC / Revit export
+* Editable wall thickness and door dimensions
+* IFC / Revit-compatible export
 
 ---
 
-## **Phase 7 — Multi-Floor & Scale Calibration**
+### Phase 7 — Multi-Floor and Scale Calibration
 
-**Status: To be built**
+**Status:** Planned
 
-* Stair detection
-* Floor stacking
+* Stair detection and floor stacking
 * Absolute scale calibration
 
 ---
 
-# 🖥️ Web Interface
+## Web Interface
 
-Streamlit-based UI:
+A Streamlit-based interface provides:
 
-* Upload a floorplan
-* Choose inference mode (Fast / High-Fidelity)
-* Run full Scan-to-BIM pipeline
-* View 3D model in browser
-* Download GLB
+* Floorplan upload
+* Inference mode selection (Fast / High-Fidelity)
+* End-to-end Scan-to-BIM execution
+* Interactive 3D visualization
+* GLB export
 
-Viewer uses **Google `<model-viewer>`** embedded via Base64.
+The viewer is implemented using Google’s `<model-viewer>` and Base64-embedded GLB rendering.
 
 ---
 
-# 📦 Repository
+## Repository Structure
 
 ```
-app.py        → Web UI
-pipeline.py   → Full Scan-to-BIM engine
+app.py        → Web interface
+pipeline.py   → Scan-to-BIM processing pipeline
 model_links.txt
 sample_io/
 ```
 
 ---
 
-# ✅ Current Capabilities
+## Current Capabilities
 
-| Feature                      | Status |
-| ---------------------------- | ------ |
-| CNN wall detection           | ✅      |
-| Tiled inference (SAHI-style) | ✅      |
-| Mask cleanup                 | ✅      |
-| Skeleton topology            | ✅      |
-| Pixel-cloud line fitting     | ✅      |
-| CAD-grade wall vectors       | ✅      |
-| Door detection               | ✅      |
-| Headers (lintels)            | ✅      |
-| Metric scaling               | ✅      |
-| 3D BIM model                 | ✅      |
-| Web viewer                   | ✅      |
-
----
-
-# ⚠️ Known Limitations
-
-* Some thin walls may be missed (CNN)
-* Corners may not perfectly close (Phase-5B pending)
-* Windows & room semantics not yet modeled
-* Single-floor only
-
-These are **expected** and solved in upcoming phases.
+| Capability                      | Status      |
+| ------------------------------- | ----------- |
+| CNN-based wall detection        | Implemented |
+| High-resolution tiled inference | Implemented |
+| Mask refinement                 | Implemented |
+| Skeleton-based topology         | Implemented |
+| Pixel-cloud line fitting        | Implemented |
+| CAD-grade wall vectors          | Implemented |
+| Door detection                  | Implemented |
+| Header (lintel) generation      | Implemented |
+| Metric scaling                  | Implemented |
+| BIM-style 3D model              | Implemented |
+| Web-based visualization         | Implemented |
 
 ---
 
-# 🏆 Why This Project Is Different
+## Known Limitations
 
-Most systems output **meshes**.
-This system outputs **architecture**.
+* Thin or ambiguous walls may be missed by the CNN
+* Corner closure is not yet guaranteed (Phase 5B pending)
+* Windows and room semantics are not yet modeled
+* Single-floor support only
 
-It models:
-
-* topology
-* geometry
-* scale
-* doors
-* walls
-* floors
-
-This is what makes it **BIM-grade**.
+These limitations are expected and addressed in planned phases.
 
 ---
 
-# 🚀 Status
+## Project Scope and Distinction
 
-**V1.5 — High-Resolution, Geometry-Accurate Scan-to-BIM Engine**
+Most systems generate **surface meshes**.
+This system reconstructs **architectural geometry**.
 
-The system now produces **CAD-grade straight walls** from raw images.
-Next phases will enforce **topological correctness and semantics**.
+It explicitly models:
 
+* Topology
+* Geometry
+* Scale
+* Walls
+* Doors
+* Floors
 
+This positions the project as a **BIM-oriented reconstruction pipeline**, rather than a visualization tool.
+
+---
+
+## Current Status
+
+**Version 1.5 — High-Resolution, Geometry-Accurate Scan-to-BIM Engine**
+
+The system currently produces straight, metric-consistent wall geometry from raster floorplans.
+Upcoming phases will focus on topological correctness and semantic enrichment.
