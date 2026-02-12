@@ -31,7 +31,7 @@ def load_model_logic(model_path, device):
     model.eval()
     return model
 
-# --- PHASE 4: TILED INFERENCE ---
+
 def get_weight_map(tile_size):
     window = np.hanning(tile_size)
     return np.outer(window, window)
@@ -39,12 +39,12 @@ def get_weight_map(tile_size):
 def predict_tiled(model, device, image, tile_size=512, overlap=0.5, progress_callback=None):
     h, w = image.shape[:2]
     
-    # Early Exit for Small Images
+    # Conditional Exit
     if h <= tile_size and w <= tile_size:
         if progress_callback: progress_callback(1.0)
         return predict_mask(model, device, image)
     
-    # RAM Safety
+    # System throttling safety
     if max(h, w) > MAX_DIM:
         scale = MAX_DIM / max(h, w)
         new_w, new_h = int(w * scale), int(h * scale)
@@ -106,15 +106,15 @@ def predict_mask(model, device, image):
     with torch.no_grad():
         return model(t).sigmoid().cpu().numpy().squeeze()
 
-# --- PHASE 4B: MASK REFINEMENT ---
+
 def refine_mask(mask, min_blob_size=50):
     """
     Cleans the probability mask using statistics and morphology.
     """
-    # 1. Hard Threshold
+    # binary mask
     binary = (mask > 0.5).astype(np.uint8) * 255
 
-    # 2. Remove Small Blobs (Dust)
+    # Remove Small Blobs (Dust)
     nb_blobs, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
     sizes = stats[1:, -1] # Skip background
     clean_mask = np.zeros_like(binary)
@@ -132,7 +132,6 @@ def refine_mask(mask, min_blob_size=50):
 
     return clean_mask
 
-# --- PHASE 5A: HYBRID VECTORIZATION ---
 
 def extract_wall_pixels(path_points, clean_mask, radius=5):
     """
@@ -223,7 +222,6 @@ def vectorize_hybrid(G, clean_mask):
                 if G_temp.has_edge(path[i], path[i+1]): 
                     G_temp.remove_edge(path[i], path[i+1])
             
-            # --- HYBRID LOGIC START ---
             
             # 1. Use RDP to find geometric breaks (corners that aren't junctions)
             # This turns curves/L-shapes into straight sub-segments
