@@ -1,0 +1,12 @@
+torch
+torchvision
+torchaudio
+
+streamlit
+numpy
+opencv-python
+networkx
+trimesh
+segmentation-models-pytorch
+scikit-image
+rdp

@@ -111,10 +111,8 @@ def refine_mask(mask, min_blob_size=50):
     """
     Cleans the probability mask using statistics and morphology.
     """
-    # binary mask
-    binary = (mask > 0.5).astype(np.uint8) * 255
+    binary = (mask > 0.7).astype(np.uint8) * 255
 
-    # Remove Small Blobs (Dust)
     nb_blobs, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
     sizes = stats[1:, -1] # Skip background
     clean_mask = np.zeros_like(binary)
@@ -122,11 +120,9 @@ def refine_mask(mask, min_blob_size=50):
         if sizes[i] >= min_blob_size:
             clean_mask[labels == i + 1] = 255
 
-    # 3. Morphological Closing (Bridge Gaps)
     kernel_close = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
     clean_mask = cv2.morphologyEx(clean_mask, cv2.MORPH_CLOSE, kernel_close)
 
-    # 4. Morphological Opening (Smooth Edges)
     kernel_open = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
     clean_mask = cv2.morphologyEx(clean_mask, cv2.MORPH_OPEN, kernel_open)
 
@@ -141,8 +137,6 @@ def extract_wall_pixels(path_points, clean_mask, radius=5):
     mask_h, mask_w = clean_mask.shape
     temp_mask = np.zeros((mask_h, mask_w), dtype=np.uint8)
     
-    # Draw the skeleton path with thickness = radius * 2
-    # This creates the "Search Region"
     pts = np.array(path_points, dtype=np.int32)
     cv2.polylines(temp_mask, [pts], isClosed=False, color=255, thickness=radius*2)
     
@@ -225,7 +219,7 @@ def vectorize_hybrid(G, clean_mask):
             
             # 1. Use RDP to find geometric breaks (corners that aren't junctions)
             # This turns curves/L-shapes into straight sub-segments
-            simple_path = rdp(path, epsilon=EPSILON)
+            simple_path = rdp(path, epsilon=EPSILON)#VYW method
             
             # 2. Process each sub-segment
             for i in range(len(simple_path) - 1):
@@ -250,6 +244,7 @@ def process_geometry(mask):
     clean_mask = refine_mask(mask)
     
     # Skeletonize (Topology Only)
+    #threshold variation
     skeleton = skeletonize(clean_mask > 0).astype(np.uint8)
     
     # Graph Construction
@@ -274,6 +269,7 @@ def process_geometry(mask):
     final_vectors = []
     seen = set()
     for p1, p2 in vectors:
+        #optimize O(nlogn)
         # Rounding needed because PCA returns floats
         t_p1 = tuple(np.round(p1).astype(int))
         t_p2 = tuple(np.round(p2).astype(int))
@@ -298,7 +294,7 @@ def create_box(p1, p2, thickness, height, z_offset=0):
     box.apply_transform(trimesh.transformations.rotation_matrix(angle, [0,0,1]))
     box.apply_translation([p1[0], p1[1], z_offset + height/2])
     return box
-
+#change next phase
 def are_collinear(p1, p2, p3, p4, tol=0.95):
     v1 = np.array(p2) - np.array(p1)
     v2 = np.array(p4) - np.array(p3)
@@ -329,7 +325,7 @@ def generate_3d_scene(vectors):
         for p1, p2 in pairs:
             d = np.linalg.norm(np.array(p1)-np.array(p2))
             if d < min_dist: min_dist, best_pair = d, (p1, p2)
-        
+        #make dynamic
         if 0.6 < min_dist < DOOR_WIDTH_MAX:
             orig_w1_s, orig_w1_e = vectors[i]
             orig_w2_s, orig_w2_e = vectors[j]
