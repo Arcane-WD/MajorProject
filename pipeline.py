@@ -9,6 +9,7 @@ from rdp import rdp
 import itertools
 import os
 import math
+from scipy.spatial import KDTree
 
 # --- CONSTANTS ---
 PIXEL_TO_METER = 0.05
@@ -21,6 +22,11 @@ WALL_THICKNESS = 0.2
 DOOR_WIDTH_MAX = 1.2
 EPSILON = 2.0
 MIN_LENGTH = 15
+
+# --- PHASE 5B CONSTANTS (TUNABLE) ---
+SNAP_THRESHOLD = 4       # pixels — cluster endpoints closer than this
+ANGLE_TOLERANCE = 7.0    # degrees — snap to axis if within this tolerance
+GAP_THRESHOLD = 10       # pixels — extend endpoints to nearby wall segments
 
 def load_model_logic(model_path, device):
     if not os.path.exists(model_path):
@@ -239,6 +245,212 @@ def vectorize_hybrid(G, clean_mask):
                 
     return vectors
 
+# ============================================================
+# PHASE 5B: Junction & Topology Optimization
+# ============================================================
+
+def snap_vertices(vectors, threshold=SNAP_THRESHOLD):
+    """
+    Cluster-based vertex snapping using Union-Find.
+    - Only merges endpoints within direct radius (no chain-clustering)
+    - Both endpoints of the SAME wall are never merged together
+      (prevents short walls from collapsing)
+    """
+    if not vectors:
+        return vectors
+    
+    # 1. Collect all endpoints
+    endpoints = []
+    for p1, p2 in vectors:
+        endpoints.append(np.array(p1, dtype=np.float64))
+        endpoints.append(np.array(p2, dtype=np.float64))
+    
+    pts = np.array(endpoints)
+    n = len(pts)
+    
+    # 2. Union-Find structure
+    parent = list(range(n))
+    
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]  # path compression
+            x = parent[x]
+        return x
+    
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+    
+    # 3. KD-tree pairwise queries — only direct neighbors, no BFS chaining
+    tree = KDTree(pts)
+    pairs = tree.query_pairs(threshold)
+    
+    # Build set of same-wall endpoint pairs (indices i*2 and i*2+1)
+    same_wall_pairs = set()
+    for i in range(len(vectors)):
+        same_wall_pairs.add((i * 2, i * 2 + 1))
+        same_wall_pairs.add((i * 2 + 1, i * 2))
+    
+    for (a, b) in pairs:
+        # Never merge endpoints of the same wall
+        if (a, b) in same_wall_pairs:
+            continue
+        union(a, b)
+    
+    # 4. Group by cluster root and compute centroids
+    from collections import defaultdict
+    cluster_map = defaultdict(list)
+    for i in range(n):
+        cluster_map[find(i)].append(i)
+    
+    point_map = {}
+    snapped_count = 0
+    for root, members in cluster_map.items():
+        centroid = np.mean(pts[members], axis=0)
+        for idx in members:
+            point_map[idx] = centroid
+        if len(members) > 1:
+            snapped_count += len(members)
+    
+    # 5. Rebuild vectors with snapped endpoints
+    snapped_vectors = []
+    for i, (p1, p2) in enumerate(vectors):
+        new_p1 = tuple(point_map[i * 2])
+        new_p2 = tuple(point_map[i * 2 + 1])
+        # Skip only if truly collapsed (< 1px)
+        if np.linalg.norm(np.array(new_p1) - np.array(new_p2)) > 1.0:
+            snapped_vectors.append((new_p1, new_p2))
+    
+    multi_clusters = sum(1 for c in cluster_map.values() if len(c) > 1)
+    print(f"  [5B-Snap] {snapped_count} endpoints snapped across {multi_clusters} clusters (threshold={threshold}px)")
+    print(f"  [5B-Snap] {len(vectors)} -> {len(snapped_vectors)} vectors ({len(vectors) - len(snapped_vectors)} collapsed)")
+    return snapped_vectors
+
+
+def enforce_manhattan(vectors, angle_tol=ANGLE_TOLERANCE):
+    """
+    Manhattan-world enforcement.
+    Walls nearly aligned with 0/90/180/270 degrees are snapped to
+    exact axis alignment. Midpoint is preserved.
+    """
+    if not vectors:
+        return vectors
+    
+    corrected = []
+    corrections = 0
+    
+    for p1, p2 in vectors:
+        p1 = np.array(p1, dtype=np.float64)
+        p2 = np.array(p2, dtype=np.float64)
+        
+        dx = p2[0] - p1[0]
+        dy = p2[1] - p1[1]
+        angle_deg = math.degrees(math.atan2(dy, dx))
+        length = math.hypot(dx, dy)
+        
+        if length < 1.0:
+            continue
+        
+        # Find nearest cardinal direction (0, 90, 180, -90)
+        cardinal_angles = [0, 90, 180, -180, -90]
+        min_diff = float('inf')
+        snap_angle = angle_deg
+        
+        for ca in cardinal_angles:
+            diff = abs(angle_deg - ca)
+            if diff < min_diff:
+                min_diff = diff
+                snap_angle = ca
+        
+        if min_diff <= angle_tol:
+            # Snap: rotate around midpoint
+            mid = (p1 + p2) / 2.0
+            half_len = length / 2.0
+            snap_rad = math.radians(snap_angle)
+            
+            new_p1 = mid - half_len * np.array([math.cos(snap_rad), math.sin(snap_rad)])
+            new_p2 = mid + half_len * np.array([math.cos(snap_rad), math.sin(snap_rad)])
+            corrected.append((tuple(new_p1), tuple(new_p2)))
+            corrections += 1
+        else:
+            corrected.append((tuple(p1), tuple(p2)))
+    
+    print(f"  [5B-Manhattan] {corrections}/{len(vectors)} walls snapped to axis")
+    return corrected
+
+
+def close_gaps(vectors, gap_threshold=GAP_THRESHOLD):
+    """
+    T-junction gap closure.
+    For endpoints not already connected to another endpoint,
+    find the nearest wall segment and extend to meet it.
+    """
+    if not vectors:
+        return vectors
+    
+    def point_to_segment_dist(p, a, b):
+        """Distance from point p to segment ab, and the closest point on ab."""
+        ap = p - a
+        ab = b - a
+        ab_sq = np.dot(ab, ab)
+        if ab_sq < 1e-10:
+            return np.linalg.norm(ap), a
+        t = np.dot(ap, ab) / ab_sq
+        t = max(0.0, min(1.0, t))
+        closest = a + t * ab
+        return np.linalg.norm(p - closest), closest
+    
+    # Collect all endpoints and check which are "free" (not shared)
+    endpoint_counts = {}  # rounded coord -> count
+    for p1, p2 in vectors:
+        k1 = (round(p1[0], 1), round(p1[1], 1))
+        k2 = (round(p2[0], 1), round(p2[1], 1))
+        endpoint_counts[k1] = endpoint_counts.get(k1, 0) + 1
+        endpoint_counts[k2] = endpoint_counts.get(k2, 0) + 1
+    
+    closed_vectors = list(vectors)  # mutable copy
+    closures = 0
+    
+    for vi in range(len(closed_vectors)):
+        p1, p2 = closed_vectors[vi]
+        p1 = np.array(p1, dtype=np.float64)
+        p2 = np.array(p2, dtype=np.float64)
+        
+        for endpoint_idx, ep in enumerate([p1, p2]):
+            ep_key = (round(ep[0], 1), round(ep[1], 1))
+            
+            # Only process "free" endpoints (connected to only 1 wall)
+            if endpoint_counts.get(ep_key, 0) > 1:
+                continue
+            
+            # Find nearest segment (excluding own segment)
+            best_dist = float('inf')
+            best_point = None
+            
+            for vj in range(len(closed_vectors)):
+                if vi == vj:
+                    continue
+                a = np.array(closed_vectors[vj][0], dtype=np.float64)
+                b = np.array(closed_vectors[vj][1], dtype=np.float64)
+                dist, closest = point_to_segment_dist(ep, a, b)
+                
+                if dist < best_dist:
+                    best_dist = dist
+                    best_point = closest
+            
+            if best_dist < gap_threshold and best_point is not None:
+                # Extend this endpoint to the closest point on the nearest segment
+                if endpoint_idx == 0:
+                    closed_vectors[vi] = (tuple(best_point), tuple(p2))
+                else:
+                    closed_vectors[vi] = (tuple(p1), tuple(best_point))
+                closures += 1
+    
+    print(f"  [5B-GapClose] {closures} endpoints extended to nearby walls")
+    return closed_vectors
+
+
 def process_geometry(mask):
     # Phase 4B: Refine Mask (Research-Grade Cleaning)
     clean_mask = refine_mask(mask)
@@ -280,6 +492,13 @@ def process_geometry(mask):
         if edge not in seen and length > MIN_LENGTH:
             seen.add(edge)
             final_vectors.append((p1, p2))
+    
+    # Phase 5B: Junction & Topology Optimization
+    print(f"  [5A] {len(final_vectors)} raw vectors extracted")
+    final_vectors = snap_vertices(final_vectors)
+    final_vectors = enforce_manhattan(final_vectors)
+    final_vectors = close_gaps(final_vectors)
+    print(f"  [5B] {len(final_vectors)} vectors after topology optimization")
             
     return final_vectors
 
