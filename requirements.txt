@@ -11,3 +11,4 @@ segmentation-models-pytorch
 scikit-image
 rdp
 scipy
+ultralytics

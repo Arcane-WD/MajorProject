@@ -204,6 +204,8 @@ sample_io/
 
 ## Current Capabilities
 
+## Current Capabilities
+
 | Capability                      | Status      |
 | ------------------------------- | ----------- |
 | CNN-based wall detection        | Implemented |
@@ -212,8 +214,9 @@ sample_io/
 | Skeleton-based topology         | Implemented |
 | Pixel-cloud line fitting        | Implemented |
 | CAD-grade wall vectors          | Implemented |
-| Door detection                  | Implemented |
-| Header (lintel) generation      | Implemented |
+| Phase 5B (Geometric Cleanup)    | Implemented |
+| Supervised YOLOv8 Training      | Implemented (mAP50=0.80) |
+| Wall-Gap Normalization (Doors)  | Planned (Phase 2C) |
 | Metric scaling                  | Implemented |
 | BIM-style 3D model              | Implemented |
 | Web-based visualization         | Implemented |
@@ -222,12 +225,9 @@ sample_io/
 
 ## Known Limitations
 
-* Thin or ambiguous walls may be missed by the CNN
-* Corner closure is not yet guaranteed (Phase 5B pending)
-* Windows and room semantics are not yet modeled
-* Single-floor support only
-
-These limitations are expected and addressed in planned phases.
+* Thin or ambiguous walls may be missed by the U-Net.
+* Intra-class YOLOv8 confusion (single vs. double vs. sliding doors), mitigated by treating all door categories interchangeably for structural logic.
+* Single-floor support only.
 
 ---
 
@@ -236,22 +236,29 @@ These limitations are expected and addressed in planned phases.
 Most systems generate **surface meshes**.
 This system reconstructs **architectural geometry**.
 
-It explicitly models:
-
-* Topology
-* Geometry
-* Scale
-* Walls
-* Doors
-* Floors
-
-This positions the project as a **BIM-oriented reconstruction pipeline**, rather than a visualization tool.
+It explicitly models topology, geometry, and scale to generate a true BIM-oriented pipeline.
 
 ---
 
 ## Current Status
 
-**Version 1.5 — High-Resolution, Geometry-Accurate Scan-to-BIM Engine**
+**Version 2.0 — Structural Scan-to-BIM Engine**
 
-The system currently produces straight, metric-consistent wall geometry from raster floorplans.
-Upcoming phases will focus on topological correctness and semantic enrichment.
+* **Phase 1 (Geometry Execution):** U-Net Inference, Trimesh routing, and Phase 5B Junction Optimization are fully implemented.
+* **Phase 2 (Architectural Detection):** A custom YOLOv8 Object Detection model has been proudly trained on Kaggle (mAP50=0.80) over 15k FloorPlanCAD samples.
+* **Current Focus (Phase 2C):** Using the highly accurate spatial bounds of YOLO door detections to *retroactively correct* wall gaps from Phase 1 (filling missing walls, carving out undetected doors, and filtering structural noise) before placing 3D GLB assets.
+
+---
+
+## Evaluation Metrics
+
+The core Phase 1 U-Net perception model was evaluated on a held-out dataset of 50 samples:
+
+| Model | IoU | Dice | Precision | Recall | F1 | Accuracy |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| v1 (10ep) | 0.8224 | 0.9005 | 0.8957 | 0.9080 | 0.9005 | 0.9817 |
+| v2 (+30ep) | 0.9333 | 0.9653 | 0.9716 | 0.9593 | 0.9653 | 0.9936 |
+| **v3 (+30ep)** | **0.9613** | **0.9801** | **0.9824** | **0.9781** | **0.9801** | **0.9964** |
+| v4 (aug+val) | 0.9190 | 0.9576 | 0.9415 | 0.9745 | 0.9576 | 0.9921 |
+
+The active repository currently uses the **v3 weights**.

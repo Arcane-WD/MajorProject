@@ -1,5 +1,37 @@
 .venv/
 __pycache__/
-*.pth
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
 
-.gitignore
+# Project specifics
+sampleio/
+runs/
+yolo_dataset/
+*.pt
+*.pth
+*.onnx
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Project outputs
+aggregate_code.py
+project_codebase.txt
+roboflow_raw_output.json
+outputs/
+
+# Furniture assets (large binaries — keep README only)
+assets/furniture/kenney_furniture_kit/Models/

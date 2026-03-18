@@ -10,6 +10,7 @@ import itertools
 import os
 import math
 from scipy.spatial import KDTree
+from collections import defaultdict
 
 # --- CONSTANTS ---
 PIXEL_TO_METER = 0.05
@@ -32,7 +33,7 @@ def load_model_logic(model_path, device):
     if not os.path.exists(model_path):
         raise FileNotFoundError(f"Model file not found at {model_path}")
     model = smp.Unet(encoder_name="resnet34", encoder_weights=None, in_channels=3, classes=1)
-    model.load_state_dict(torch.load(model_path, map_location=device))
+    model.load_state_dict(torch.load(model_path, map_location=device, weights_only=True))
     model.to(device)
     model.eval()
     return model
@@ -299,7 +300,6 @@ def snap_vertices(vectors, threshold=SNAP_THRESHOLD):
         union(a, b)
     
     # 4. Group by cluster root and compute centroids
-    from collections import defaultdict
     cluster_map = defaultdict(list)
     for i in range(n):
         cluster_map[find(i)].append(i)
@@ -451,7 +451,7 @@ def close_gaps(vectors, gap_threshold=GAP_THRESHOLD):
     return closed_vectors
 
 
-def process_geometry(mask):
+def process_geometry(mask, original_image=None, yolo_weights=None):
     # Phase 4B: Refine Mask (Research-Grade Cleaning)
     clean_mask = refine_mask(mask)
     
@@ -499,8 +499,16 @@ def process_geometry(mask):
     final_vectors = enforce_manhattan(final_vectors)
     final_vectors = close_gaps(final_vectors)
     print(f"  [5B] {len(final_vectors)} vectors after topology optimization")
-            
-    return final_vectors
+
+    # Phase 2C: Structural Correction (if YOLO weights available)
+    detections = []
+    if original_image is not None and yolo_weights is not None:
+        import structural_corrector
+        final_vectors, detections = structural_corrector.correct_structure(
+            original_image, final_vectors, weights_path=yolo_weights
+        )
+    
+    return final_vectors, detections
 
 def create_box(p1, p2, thickness, height, z_offset=0):
     p1, p2 = np.array(p1), np.array(p2)
@@ -514,12 +522,28 @@ def create_box(p1, p2, thickness, height, z_offset=0):
     box.apply_translation([p1[0], p1[1], z_offset + height/2])
     return box
 #change next phase
-def are_collinear(p1, p2, p3, p4, tol=0.95):
+def are_collinear(p1, p2, p3, p4, angle_tol=0.95, dist_tol=0.2):
+    """
+    Check if two wall segments are geometrically collinear.
+    This means they are parallel AND lie along the exact same infinite line.
+    Note: dist_tol is in meters here since vectors are scaled before header generation.
+    """
     v1 = np.array(p2) - np.array(p1)
     v2 = np.array(p4) - np.array(p3)
     n1, n2 = np.linalg.norm(v1), np.linalg.norm(v2)
-    if n1 == 0 or n2 == 0: return False
-    return abs(np.dot(v1, v2) / (n1 * n2)) > tol
+    if n1 < 1e-6 or n2 < 1e-6: 
+        return False
+        
+    # 1. Check parallel direction
+    if abs(np.dot(v1, v2) / (n1 * n2)) < angle_tol:
+        return False
+        
+    # 2. Check strict collinearity: distance to the infinite line
+    v1_normal = np.array([-v1[1], v1[0]]) / n1
+    dist_p3 = abs(np.dot(np.array(p3) - np.array(p1), v1_normal))
+    dist_p4 = abs(np.dot(np.array(p4) - np.array(p1), v1_normal))
+    
+    return dist_p3 <= dist_tol and dist_p4 <= dist_tol
 
 def generate_3d_scene(vectors):
     scene_meshes = []
