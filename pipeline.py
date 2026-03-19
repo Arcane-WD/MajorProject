@@ -545,7 +545,147 @@ def are_collinear(p1, p2, p3, p4, angle_tol=0.95, dist_tol=0.2):
     
     return dist_p3 <= dist_tol and dist_p4 <= dist_tol
 
-def generate_3d_scene(vectors):
+def point_to_segment_dist(pt, v, w):
+    """Returns the distance and the closest projected point from pt to the line segment v-w."""
+    l2 = np.sum((v - w)**2)
+    if l2 == 0.0: return np.linalg.norm(pt - v), v
+    t = max(0, min(1, np.dot(pt - v, w - v) / l2))
+    projection = v + t * (w - v)
+    return np.linalg.norm(pt - projection), projection
+
+FURNITURE_ASSETS = {
+    "bed": ("bedDouble.glb", [2.0, 1.4]),
+    "squat_toilet": ("toilet.glb", [0.7, 0.5]),
+    "bath": ("bathtub.glb", [1.7, 0.8]),
+    "half_height_cabinet": ("sideTable.glb", [0.6, 0.6]),
+    "kitchen_cabinet": ("kitchenCabinet.glb", [0.6, 0.6]),
+    "sofa": ("loungeSofa.glb", [2.0, 0.9]),
+    "table": ("table.glb", [1.5, 0.9]),
+    "chair": ("chair.glb", [0.5, 0.5]),
+    "sink": ("bathroomSink.glb", [0.6, 0.5])
+}
+
+DOOR_CLASSES = {"single_door", "double_door", "sliding_door"}
+
+import os
+
+def place_architectural_elements(detections, scaled_wall_vectors, scene_meshes):
+    """
+    Places 3D doors and furniture into the scene based on YOLO detections.
+    Uses canonical real-world dimensions for assets and snaps to closest walls.
+    """
+    for det in detections:
+        # We only place elements that were considered valid (or we can place all that pass confidence)
+        if det.get("status") == "ignored":
+            continue
+            
+        cls = det["class"]
+        center_px = np.array([det["x_center"], det["y_center"]])
+        center_m = center_px * PIXEL_TO_METER
+        
+        # Determine bbox physical orientation preference
+        bbox_aspect = det["width"] / (det["height"] + 1e-5)
+        
+        # 1. Find Closest Wall for Rotation Snapping
+        best_dist = float('inf')
+        best_proj = center_m
+        best_wall_vec = np.array([1.0, 0.0])
+        
+        for w1, w2 in scaled_wall_vectors:
+            dist, proj = point_to_segment_dist(center_m, w1, w2)
+            
+            wall_dir = w2 - w1
+            n = np.linalg.norm(wall_dir)
+            if n > 1e-5:
+                w_norm = wall_dir / n
+                # Penalize perpendicular walls based on bbox aspect
+                if cls in DOOR_CLASSES:
+                    if bbox_aspect > 1.2 and abs(w_norm[1]) > 0.707: # Door is horizontal, wall is vertical
+                        dist += 0.3
+                    elif bbox_aspect < 0.8 and abs(w_norm[0]) > 0.707: # Door is vertical, wall is horizontal
+                        dist += 0.3
+                        
+            if dist < best_dist:
+                best_dist = dist
+                best_proj = proj
+                if n > 1e-5:
+                    best_wall_vec = w_norm
+
+        wall_angle = np.arctan2(best_wall_vec[1], best_wall_vec[0])
+
+        # 2. Place DOORS (Colored Intersecting Blocks for Visualization)
+        if cls in DOOR_CLASSES:
+            # Clamp door widths to realistic architectural scales (0.7m to 1.5m)
+            raw_width = det["width"] * PIXEL_TO_METER
+            door_width_m = max(0.7, min(1.5, raw_width))
+            
+            box = trimesh.creation.box(extents=[door_width_m, WALL_THICKNESS * 2.5, DOOR_HEIGHT])
+            mat = trimesh.visual.material.PBRMaterial(baseColorFactor=[139, 69, 19, 255], metallicFactor=0.0, roughnessFactor=1.0)
+            box.visual = trimesh.visual.TextureVisuals(material=mat)
+            
+            box.apply_transform(trimesh.transformations.rotation_matrix(wall_angle, [0,0,1]))
+            box.apply_translation([best_proj[0], best_proj[1], DOOR_HEIGHT / 2])
+            scene_meshes.append(box)
+            
+        # 3. Place FURNITURE (GLB Loads with Fallbacks)
+        elif cls in FURNITURE_ASSETS:
+            asset_name, (length_m, width_m) = FURNITURE_ASSETS[cls]
+            asset_path = os.path.join("assets", "furniture", "kenney_furniture-kit", "Models", "GLTF format", asset_name)
+            
+            bbox_aspect = det["width"] / (det["height"] + 1e-5)
+            
+            # Snap rotation: align dominant axis of bbox to the wall orientation
+            rot_angle = wall_angle
+            if bbox_aspect < 0.8 and abs(np.cos(wall_angle)) > 0.707:
+                rot_angle += np.pi / 2
+            elif bbox_aspect > 1.2 and abs(np.sin(wall_angle)) > 0.707:
+                rot_angle += np.pi / 2
+
+            try:
+                mesh = trimesh.load(asset_path, force='mesh')
+                if isinstance(mesh, trimesh.Scene):
+                    geom = tuple(trimesh.Trimesh(vertices=g.vertices, faces=g.faces) for g in mesh.geometry.values())
+                    if not geom: raise ValueError("Empty scene")
+                    mesh = trimesh.util.concatenate(geom)
+                
+                # Scale the model to fit canonical footprint dimensions
+                extents = mesh.extents
+                scale_x = length_m / (extents[0] if extents[0] > 0 else 1)
+                scale_z = width_m / (extents[2] if extents[2] > 0 else 1) # footprint is XZ for natively Y-up models
+                
+                scale_matrix = np.eye(4)
+                scale_matrix[0,0], scale_matrix[1,1], scale_matrix[2,2] = scale_x, min(scale_x, scale_z), scale_z
+                mesh.apply_transform(scale_matrix)
+                
+                # Apply a 90-degree X-rotation to make Y-up models strictly Z-up
+                mesh.apply_transform(trimesh.transformations.rotation_matrix(np.pi/2, [1, 0, 0]))
+                
+                # Align bottom center to origin before translating
+                bounds = mesh.bounds
+                center_offset = [-(bounds[0][0] + bounds[1][0])/2,
+                                 -(bounds[0][1] + bounds[1][1])/2,
+                                 -bounds[0][2]]
+                mesh.apply_translation(center_offset)
+                
+                mesh.apply_transform(trimesh.transformations.rotation_matrix(rot_angle, [0,0,1]))
+                # Use raw detection center, not projected (since furniture sits in rooms)
+                mesh.apply_translation([center_m[0], center_m[1], 0]) 
+                scene_meshes.append(mesh)
+                
+            except Exception as e:
+                # Robust fallback primitive if asset fails
+                print(f"  [3D] Failed to load {asset_path}, using static block. ({e})")
+                
+                bbox_w_m = det["width"] * PIXEL_TO_METER
+                bbox_h_m = det["height"] * PIXEL_TO_METER
+                
+                box = trimesh.creation.box(extents=[bbox_w_m, bbox_h_m, 1.0])
+                mat = trimesh.visual.material.PBRMaterial(baseColorFactor=[100, 149, 237, 255], metallicFactor=0.0, roughnessFactor=1.0)
+                box.visual = trimesh.visual.TextureVisuals(material=mat)
+                box.apply_translation([center_m[0], center_m[1], 0.5])
+                scene_meshes.append(box)
+
+def generate_wall_geometry(vectors):
     scene_meshes = []
     scaled_vectors = []
     
@@ -556,7 +696,8 @@ def generate_3d_scene(vectors):
         scaled_vectors.append((s_p1, s_p2))
         wall = create_box(s_p1, s_p2, WALL_THICKNESS, WALL_HEIGHT)
         if wall:
-            wall.visual.face_colors = [220, 220, 220, 255]
+            mat = trimesh.visual.material.PBRMaterial(baseColorFactor=[180, 180, 180, 255], metallicFactor=0.0, roughnessFactor=1.0)
+            wall.visual = trimesh.visual.TextureVisuals(material=mat)
             scene_meshes.append(wall)
             
     # Headers
@@ -568,14 +709,15 @@ def generate_3d_scene(vectors):
         for p1, p2 in pairs:
             d = np.linalg.norm(np.array(p1)-np.array(p2))
             if d < min_dist: min_dist, best_pair = d, (p1, p2)
-        #make dynamic
+            
         if 0.6 < min_dist < DOOR_WIDTH_MAX:
             orig_w1_s, orig_w1_e = vectors[i]
             orig_w2_s, orig_w2_e = vectors[j]
             if are_collinear(orig_w1_s, orig_w1_e, orig_w2_s, orig_w2_e):
                 header = create_box(best_pair[0], best_pair[1], WALL_THICKNESS, HEADER_SIZE, z_offset=DOOR_HEIGHT)
                 if header:
-                    header.visual.face_colors = [200, 200, 200, 255]
+                    mat = trimesh.visual.material.PBRMaterial(baseColorFactor=[150, 150, 150, 255], metallicFactor=0.0, roughnessFactor=1.0)
+                    header.visual = trimesh.visual.TextureVisuals(material=mat)
                     scene_meshes.append(header)
     
     # Floor
@@ -586,8 +728,17 @@ def generate_3d_scene(vectors):
         cx, cy = (max_x + min_x)/2, (max_y + min_y)/2
         floor = trimesh.creation.box(extents=[w, d, 0.2])
         floor.apply_translation([cx, cy, -0.1])
-        floor.visual.face_colors = [100, 100, 100, 255]
+        mat = trimesh.visual.material.PBRMaterial(baseColorFactor=[60, 60, 60, 255], metallicFactor=0.0, roughnessFactor=1.0)
+        floor.visual = trimesh.visual.TextureVisuals(material=mat)
         scene_meshes.append(floor)
+        
+    return scene_meshes, scaled_vectors
+
+def generate_3d_scene(vectors, detections=None):
+    scene_meshes, scaled_vectors = generate_wall_geometry(vectors)
+    
+    if detections:
+        place_architectural_elements(detections, scaled_vectors, scene_meshes)
 
     if not scene_meshes: return None
 

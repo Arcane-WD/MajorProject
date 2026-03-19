@@ -18,13 +18,10 @@ MAX_DOOR_WALL_DIST = 45.0
 NOISE_GAP_THRESH = 25.0
 COLLINEAR_TOL = 0.92
 DOOR_CLASSES = {
-    "single_door", "double_door", "sliding_door",
-    "window", "bay_window", "blind_window", "opening_symbol"
+    "single_door", "double_door", "sliding_door"
 }
-IGNORED_CLASSES = {"bath", "stair", "escalator", "class_31", "railing", "wall", "parking"}
-
-# ADD THIS LINE:
-USEFUL_CLASSES = DOOR_CLASSES  # Only door/window types are structurally actionable
+IGNORED_CLASSES = {"stair", "escalator", "class_31", "railing", "wall", "parking"}
+USEFUL_CLASSES = {"single_door", "double_door", "sliding_door", "window", "bay_window", "blind_window", "opening_symbol", "bed", "half_height_cabinet", "squat_toilet", "bath", "kitchen_cabinet", "sofa", "table", "chair", "sink"}
 
 def load_yolo_model(weights_path="best.pt"):
     """Load the trained YOLOv8 model."""
@@ -204,15 +201,11 @@ def _find_collinear_gap_pairs(vectors):
     return gap_pairs
 
 
-def normalize_wall_gaps(vectors, door_detections):
+def fill_small_gaps(vectors, door_detections):
     """
-    Step 3: Wall Gap Normalization — the core algorithm.
-
-    Scenario A: Fill gaps that have no door bbox nearby.
-    Scenario B: Carve gaps where a door bbox overlaps an unbroken wall.
-    Scenario C: Resize gaps that are much larger than the door bbox.
+    Step 3: Wall Gap Normalization.
+    Fill tiny noise gaps that have no door bbox nearby.
     """
-    # Separate door-type detections for gap logic
     door_dets = [d for d in door_detections if d["class"] in DOOR_CLASSES]
     print(f"  [2C-Normalize] Working with {len(door_dets)} door-type detections and {len(vectors)} wall segments")
 
@@ -238,14 +231,13 @@ def normalize_wall_gaps(vectors, door_detections):
                 break
 
         if not gap_has_door:
-            gaps_to_merge.add((i, j, ei_idx, ej_idx))
+            gaps_to_merge.add((i, j, ei_idx, ej_idx, gap_dist))
             gaps_filled += 1
 
     # Apply gap fills by extending endpoints to meet
     modified_vectors = list(vectors)
-    merged_indices = set()
 
-    for (i, j, ei_idx, ej_idx) in gaps_to_merge:
+    for (i, j, ei_idx, ej_idx, gap_dist) in gaps_to_merge:
         p1_i, p2_i = modified_vectors[i]
         p1_j, p2_j = modified_vectors[j]
 
@@ -268,141 +260,117 @@ def normalize_wall_gaps(vectors, door_detections):
         print(f"    [Scenario A] Filled false gap of {gap_dist:.1f}px (Limit: {NOISE_GAP_THRESH}px)")
 
     print(f"  [2C-ScenarioA] Filled {gaps_filled} false gaps (no door present)")
+    print(f"  [2C-Result] {len(vectors)} input vectors → {len(modified_vectors)} output vectors")
 
-    # --- Scenario B: Carve undetected door openings ---
+    return modified_vectors
+
+
+def carve_doors_out_of_walls(vectors, door_detections):
+    """
+    Slices the 2D wall graph vectors to create physical topological gaps where doors are detected.
+    This fulfills the BIM requirement of having actual modeled openings natively.
+    """
+    valid_doors = [d for d in door_detections if d.get("status") == "valid_door"]
+    modified_vectors = list(vectors)
+    
     doors_carved = 0
-    new_vectors = []
-    walls_to_skip = set()
 
-    for det in door_dets:
+    for det in valid_doors:
         det_center = np.array([det["x_center"], det["y_center"]])
+        
+        import pipeline
+        door_widths_m = {"single_door": 0.9, "sliding_door": 1.2, "double_door": 1.6}
+        door_width_px = door_widths_m.get(det["class"], 0.9) / pipeline.PIXEL_TO_METER
+        bbox_aspect = det["width"] / (det["height"] + 1e-5)
+        # Determine door's dominant axis unit vector
+        if bbox_aspect >= 1.0:
+            door_axis = np.array([1.0, 0.0])  # horizontal door
+        else:
+            door_axis = np.array([0.0, 1.0])  # vertical door
 
-        for vi in range(len(modified_vectors)):
-            if vi in walls_to_skip:
-                continue
-
-            p1 = np.array(modified_vectors[vi][0], dtype=np.float64)
-            p2 = np.array(modified_vectors[vi][1], dtype=np.float64)
-
-            dist, closest = _point_to_segment_dist(det_center, p1, p2)
-
-            if dist > MAX_DOOR_WALL_DIST:
-                continue
-
-            # Check if the door bbox is fully INSIDE this wall segment (wall covers the door)
-            wall_vec = p2 - p1
-            wall_len = np.linalg.norm(wall_vec)
-            if wall_len < 1.0:
-                continue
-
-            wall_dir = wall_vec / wall_len
-
-            # Project door bbox edges onto the wall direction
-            # Determine door width along the wall
-            bbox_corners = [
-                np.array([det["x1"], det["y1"]]),
-                np.array([det["x2"], det["y1"]]),
-                np.array([det["x1"], det["y2"]]),
-                np.array([det["x2"], det["y2"]]),
-            ]
-            projections = [np.dot(c - p1, wall_dir) for c in bbox_corners]
-            proj_min = max(0, min(projections))
-            proj_max = min(wall_len, max(projections))
-
-            door_span = proj_max - proj_min
-
-            if door_span < 5.0:  # Door bbox doesn't meaningfully overlap this wall
-                continue
-
-            # Check if there's already a gap here (gap pairs cover this)
-            # If wall is continuous through the door area, we need to carve
-            # Split: wall[p1 → cut_start] + gap + wall[cut_end → p2]
-            cut_start_pt = p1 + proj_min * wall_dir
-            cut_end_pt = p1 + proj_max * wall_dir
-
-            # Only carve if the door is substantially inside the wall
-            if proj_min > 2.0 and (wall_len - proj_max) > 2.0:
-                walls_to_skip.add(vi)
-                new_vectors.append((tuple(p1), tuple(cut_start_pt)))
-                new_vectors.append((tuple(cut_end_pt), tuple(p2)))
-                doors_carved += 1
-                break  # This door has been handled
-
-    # Rebuild the vector list
-    final_vectors = []
-    for vi in range(len(modified_vectors)):
-        if vi not in walls_to_skip:
-            final_vectors.append(modified_vectors[vi])
-    final_vectors.extend(new_vectors)
-
-    print(f"  [2C-ScenarioB] Carved {doors_carved} new door openings in continuous walls")
-
-    # --- Scenario C: Resize oversized gaps ---
-    # Re-scan for collinear gaps that are oversized relative to door bbox
-    gap_pairs_post = _find_collinear_gap_pairs(final_vectors)
-    gaps_resized = 0
-
-    for (i, j, gap_dist, gap_p1, gap_p2, ei_idx, ej_idx) in gap_pairs_post:
-        gap_center = (gap_p1 + gap_p2) / 2.0
-        gap_dir = gap_p2 - gap_p1
-        gap_dir_norm = gap_dir / np.linalg.norm(gap_dir)
-
-        for det in door_dets:
-            det_center = np.array([det["x_center"], det["y_center"]])
+        best_wall_idx = -1
+        best_cost = float('inf')
+        
+        for vi, (p1, p2) in enumerate(modified_vectors):
+            p1_np, p2_np = np.array(p1), np.array(p2)
             
-            # 1. Door center must be strictly near the infinite line connecting the gap endpoints
-            v1_normal = np.array([-gap_dir_norm[1], gap_dir_norm[0]])
-            dist_to_line = abs(np.dot(det_center - gap_p1, v1_normal))
-            if dist_to_line > MAX_DOOR_WALL_DIST:
-                continue
-
-            # 2. Door center must physically overlap the gap (close to gap center)
-            dist_to_gap_center = np.linalg.norm(det_center - gap_center)
-
-            # 3. Gap cannot be ridiculously large compared to the door length
-            door_width_along_gap = abs(det["width"] * gap_dir_norm[0]) + abs(det["height"] * gap_dir_norm[1])
+            # Perpendicular distance component
+            d_perp, _ = _point_to_segment_dist(det_center, p1_np, p2_np)
             
-            if dist_to_gap_center > door_width_along_gap * 1.0:
-                continue # Door is not centered in the gap
-
-            if door_width_along_gap < 5.0:
+            wall_dir_v = p2_np - p1_np
+            wall_len_v = np.linalg.norm(wall_dir_v)
+            if wall_len_v < 1e-5:
                 continue
+            w_norm = wall_dir_v / wall_len_v
+            
+            # Orientation cost: 0 = perfectly aligned, 1 = perpendicular
+            # J_orient = 1 - |dot(wall_dir, door_axis)|
+            j_orient = 1.0 - abs(np.dot(w_norm, door_axis))
+            
+            # Projection constraint: penalise centers projecting outside the segment
+            t = np.dot(det_center - p1_np, w_norm)
+            half_gap = door_width_px / 2.0
+            sigma_far = max(door_width_px, 20.0)
+            overshoot = max(0, t - (wall_len_v + half_gap))
+            undershoot = max(0, -half_gap - t)
+            j_proj = (overshoot**2 + undershoot**2) / (sigma_far**2)
+            
+            # Combined cost — weights tuned to noise characteristics
+            # α=1 (distance in px), β=40 (orientation, same scale as 40px penalty), γ=1 (projection)
+            cost = d_perp + 40.0 * j_orient + j_proj
+                    
+            if cost < best_cost:
+                best_cost = cost
+                best_wall_idx = vi
+                
+        # We cap the reasonable bounding cost to standard max distance mapping heuristics
+        if best_cost > MAX_DOOR_WALL_DIST * 2.0 or best_wall_idx == -1:
+            continue
+            
+        p1, p2 = modified_vectors[best_wall_idx]
+        p1_np, p2_np = np.array(p1), np.array(p2)
+        wall_vec = p2_np - p1_np
+        wall_len = np.linalg.norm(wall_vec)
+        
+        if wall_len < 5.0:
+            continue
+            
+        wall_dir = wall_vec / wall_len
+        proj_center = np.dot(det_center - p1_np, wall_dir)
+        proj_min = max(0.0, proj_center - door_width_px / 2.0)
+        proj_max = min(wall_len, proj_center + door_width_px / 2.0)
+        
+        # MathGPT Q3 fix: skip only if the entire wall is consumed
+        # Never silent-skip based on small stub size alone
+        if proj_max - proj_min < 2.0:
+            continue   # gap narrower than 2px — wrong wall or bad projection
+            
+        cut_start_pt = p1_np + proj_min * wall_dir
+        cut_end_pt   = p1_np + proj_max * wall_dir
+        
+        new_segments = []
+        S_L = proj_min                   # length of left stub
+        S_R = wall_len - proj_max        # length of right stub
+        
+        if S_L > 2.0:
+            new_segments.append((tuple(p1_np), tuple(cut_start_pt)))
+        # if S_L <= 2.0 → door is near p1, left stub absorbed — correct behaviour
+            
+        if S_R > 2.0:
+            new_segments.append((tuple(cut_end_pt), tuple(p2_np)))
+        # if S_R <= 2.0 → door is near p2, right stub absorbed — correct behaviour
+        # Both <= 2.0 only if wall_len ≈ door_width, i.e. wall shorter than door — correct to remove it
+            
+        modified_vectors.pop(best_wall_idx)
+        for seg in reversed(new_segments):
+            modified_vectors.insert(best_wall_idx, seg)
+            
+        doors_carved += 1
+        
+    print(f"  [2C-Carve] Carved {doors_carved} topological gaps into the walls for detected doors.")
+    return modified_vectors
 
-            if gap_dist > door_width_along_gap * 1.5 and gap_dist <= door_width_along_gap * 3.0:
-                print(f"    [Scenario C] Resizing gap {gap_dist:.1f}px to match door {door_width_along_gap:.1f}px")
-                # Shrink gap to match door width
-                shrink_amount = (gap_dist - door_width_along_gap) / 2.0
-                p1_i, p2_i = final_vectors[i]
-                p1_j, p2_j = final_vectors[j]
-
-                # ADD `shrink_amount * gap_dir_norm` to move towards gap_p2
-                if ei_idx == 1:
-                    new_ep = np.array(p2_i) + shrink_amount * gap_dir_norm
-                    final_vectors[i] = (p1_i, tuple(new_ep))
-                else:
-                    new_ep = np.array(p1_i) + shrink_amount * gap_dir_norm
-                    final_vectors[i] = (tuple(new_ep), p2_i)
-
-                # SUBTRACT `shrink_amount * gap_dir_norm` to move towards gap_p1
-                if ej_idx == 1:
-                    new_ep = np.array(p2_j) - shrink_amount * gap_dir_norm
-                    final_vectors[j] = (p1_j, tuple(new_ep))
-                else:
-                    new_ep = np.array(p1_j) - shrink_amount * gap_dir_norm
-                    final_vectors[j] = (tuple(new_ep), p2_j)
-
-                gaps_resized += 1
-                break  # One door per gap
-            else:
-                print(f"    [Scenario C] Skipped gap {gap_dist:.1f}px vs door {door_width_along_gap:.1f}px (ratio {gap_dist/door_width_along_gap:.1f}x)")
-
-    print(f"  [2C-ScenarioC] Resized {gaps_resized} oversized gaps to match door width")
-    print(f"  [2C-Result] {len(vectors)} input vectors → {len(final_vectors)} output vectors")
-
-    return final_vectors
-
-
-def correct_structure(image, vectors, weights_path="best.pt"):
+def correct_structure(image, vectors, weights_path="best.pt", is_fast_mode=False):
     """
     Main entry point for Phase 2C.
     Takes the original image and Phase 5B vectors, returns corrected vectors.
@@ -413,6 +381,23 @@ def correct_structure(image, vectors, weights_path="best.pt"):
     model = load_yolo_model(weights_path)
     detections = run_yolo_inference(model, image)
     print(f"  [2C] YOLO detected {len(detections)} objects")
+    
+    # 1.b Math scale for Fast Mode mismatch
+    if is_fast_mode:
+        h, w = image.shape[:2]
+        scale = 512.0 / max(h, w)
+        # Keep padding in float — don't truncate to int until final coordinate assignment
+        new_w_f = w * scale
+        new_h_f = h * scale
+        pad_left_f = (512.0 - new_w_f) / 2.0
+        pad_top_f  = (512.0 - new_h_f) / 2.0
+        for det in detections:
+            for k in ["x1", "x2", "x_center"]:
+                det[k] = det[k] * scale + pad_left_f
+            for k in ["y1", "y2", "y_center"]:
+                det[k] = det[k] * scale + pad_top_f
+            det["width"] *= scale
+            det["height"] *= scale
 
     if not detections:
         print("  [2C] No detections — returning vectors unchanged")
@@ -438,15 +423,19 @@ def correct_structure(image, vectors, weights_path="best.pt"):
         if "status" not in det:
             det["status"] = "ignored"
 
-    # 4. Normalize Wall Gaps
-    # Only use valid doors for structural correction
+    # 4. Fill Noise Gaps
+    # Only use valid doors for gap interference
     door_dets = [d for d in detections if d.get("status") == "valid" and d["class"] in DOOR_CLASSES]
     
-    # Tag them specifically so the UI knows these were the ones used for walls
+    # Tag them specifically so the UI knows these were the ones used for structural influence
     for d in door_dets:
         d["status"] = "valid_door"
         
-    final_vectors = normalize_wall_gaps(vectors, door_dets)
+    # Phase A: Close small fractures
+    vectors_closed = fill_small_gaps(vectors, door_dets)
+    
+    # Phase B: Slice actual door gaps cleanly out of the dense vectors
+    final_vectors = carve_doors_out_of_walls(vectors_closed, door_dets)
 
     return final_vectors, detections
 

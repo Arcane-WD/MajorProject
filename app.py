@@ -62,6 +62,16 @@ def draw_vectors_on_image(shape, vectors, color=(0, 255, 0), thickness=2):
         cv2.line(canvas, pt1, pt2, color, thickness)
     return canvas
 
+def draw_doors_on_vector_map(canvas, detections):
+    """Draw thick colored regions for detected valid doors over the vector map."""
+    canvas_out = canvas.copy()
+    for det in detections:
+        if det.get("status") == "valid_door":
+            x_c, y_c = int(det["x_center"]), int(det["y_center"])
+            w, h = int(det["width"]), int(det["height"])
+            cv2.rectangle(canvas_out, (x_c - w//2, y_c - h//2), (x_c + w//2, y_c + h//2), (0, 165, 255), -1) # Orange filled box
+    return canvas_out
+
 def draw_yolo_boxes(image, detections):
     overlay = image.copy()
     colors = {
@@ -157,18 +167,17 @@ def main():
                 vectors, detections = pipeline.process_geometry(mask, original_image=bgr, yolo_weights=yolo_w)
 
             # 3D
-            with st.spinner("Constructing 3D Model..."):
-                mesh = pipeline.generate_3d_scene(vectors)
-
-            if mesh:
-                glb_bytes = mesh_to_glb_bytes(mesh)
-                with col2:
-                    det_msg = f" · {len(detections)} icons detected" if detections else ""
-                    st.success(f"✅ {len(vectors)} walls reconstructed{det_msg}")
-                    render_3d_viewer(glb_bytes)
-                    st.download_button("📥 Download GLB", glb_bytes, "floorplan.glb", "model/gltf-binary")
-            else:
-                st.error("No geometry detected.")
+            with st.spinner("Building interactive 3D model..."):
+                mesh = pipeline.generate_3d_scene(vectors, detections)
+                if mesh:
+                    glb_bytes = mesh_to_glb_bytes(mesh)
+                    with col2:
+                        det_msg = f" · {len(detections)} icons detected" if detections else ""
+                        st.success(f"✅ {len(vectors)} walls reconstructed{det_msg}")
+                        render_3d_viewer(glb_bytes)
+                        st.download_button("📥 Download GLB", glb_bytes, "floorplan.glb", "model/gltf-binary")
+                else:
+                    st.error("No geometry detected.")
 
     # ============================
     #  DEMONSTRATIVE MODE
@@ -253,21 +262,27 @@ def main():
             # ── Stage 4: YOLO Detection + Structural Correction ──
             vectors_final = vectors_5b
             detections = []
+            all_tracked_dets = []
 
             if yolo_available:
                 with st.status("Stage 4: YOLOv8 Detection & Structural Correction", expanded=True) as status:
-                    vectors_corrected, all_tracked_dets = structural_corrector.correct_structure(image, vectors_5b)
+                    is_fast = (inference_mode == "Fast (512px)")
+                    vectors_corrected, all_tracked_dets = structural_corrector.correct_structure(image, vectors_5b, is_fast_mode=is_fast)
                     
                     discarded_doors = [d for d in all_tracked_dets if d.get("status") == "discarded" and d["class"] in structural_corrector.DOOR_CLASSES]
                     valid_doors = [d for d in all_tracked_dets if d.get("status") == "valid_door"]
+                    furniture_dets = [d for d in all_tracked_dets if d["class"] in pipeline.FURNITURE_ASSETS]
 
-                    c1_yolo, c2_yolo = st.columns(2)
+                    c1_yolo, c2_yolo, c3_yolo = st.columns(3)
                     with c1_yolo:
                         discard_vis = draw_yolo_boxes(image_rgb, discarded_doors)
                         st.image(discard_vis, caption=f"Discarded Doors ({len(discarded_doors)})", width="stretch")
                     with c2_yolo:
                         valid_vis = draw_yolo_boxes(image_rgb, valid_doors)
                         st.image(valid_vis, caption=f"Used Doors ({len(valid_doors)})", width="stretch")
+                    with c3_yolo:
+                        furn_vis = draw_yolo_boxes(image_rgb, furniture_dets)
+                        st.image(furn_vis, caption=f"Furniture ({len(furniture_dets)})", width="stretch")
 
                     vectors_final = vectors_corrected
 
@@ -278,6 +293,7 @@ def main():
                                  caption=f"Before Correction ({len(vectors_5b)})", width="stretch")
                     with c2:
                         post_corr_img = draw_vectors_on_image(image.shape, vectors_corrected, color=(0, 255, 128))
+                        post_corr_img = draw_doors_on_vector_map(post_corr_img, all_tracked_dets)
                         st.image(cv2.cvtColor(post_corr_img, cv2.COLOR_BGR2RGB),
                                  caption=f"After Correction ({len(vectors_corrected)})", width="stretch")
 
@@ -288,8 +304,9 @@ def main():
             # ── Stage 5: 3D Model Generation ──
             with st.status("Stage 5: 3D Model Construction", expanded=True) as status:
                 mesh_pre = pipeline.generate_3d_scene(vectors_5b)
-                mesh_post = pipeline.generate_3d_scene(vectors_final)
-
+                mesh_post = pipeline.generate_3d_scene(vectors_final, all_tracked_dets)
+                
+                c1_3d, c2_3d = st.columns(2)
                 if mesh_pre and mesh_post and yolo_available:
                     glb_pre = mesh_to_glb_bytes(mesh_pre)
                     glb_post = mesh_to_glb_bytes(mesh_post)

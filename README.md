@@ -132,15 +132,23 @@ This produces straight, metric-accurate wall vectors while preserving connectivi
 
 ### Phase 5B — Junction and Topology Optimization
 
-**Status:** Planned
+**Status:** Implemented
 
-Planned enhancements include:
+Enhancements include:
 
 * Vertex snapping and corner closure
 * Manhattan-world (orthogonality) enforcement
-* Room boundary closure
+* Noise-gap healing and wall truncation bridging
 
 Objective: to produce a topologically consistent floorplan suitable for semantic reasoning.
+
+---
+
+### Phase 2C — Semantic Object Detection & Structural Correction
+
+**Status:** Implemented
+
+Incorporates YOLOv8 object detection to identify architectural features (doors, sliding doors) and natively carve topological gaps into the vectorized walls based on advanced probabilistic geometric slicing heuristics.
 
 ---
 
@@ -216,7 +224,7 @@ sample_io/
 | CAD-grade wall vectors          | Implemented |
 | Phase 5B (Geometric Cleanup)    | Implemented |
 | Supervised YOLOv8 Training      | Implemented (mAP50=0.80) |
-| Wall-Gap Normalization (Doors)  | Planned (Phase 2C) |
+| Phase 2C (Wall-Gap Correction)  | Implemented |
 | Metric scaling                  | Implemented |
 | BIM-style 3D model              | Implemented |
 | Web-based visualization         | Implemented |
@@ -227,6 +235,7 @@ sample_io/
 
 * Thin or ambiguous walls may be missed by the U-Net.
 * Intra-class YOLOv8 confusion (single vs. double vs. sliding doors), mitigated by treating all door categories interchangeably for structural logic.
+* **Furniture Orientation:** Furniture orientation relies on snap-alignment to the nearest wall, which could be inaccurate for center-room furniture.
 * Single-floor support only.
 
 ---
@@ -245,8 +254,8 @@ It explicitly models topology, geometry, and scale to generate a true BIM-orient
 **Version 2.0 — Structural Scan-to-BIM Engine**
 
 * **Phase 1 (Geometry Execution):** U-Net Inference, Trimesh routing, and Phase 5B Junction Optimization are fully implemented.
-* **Phase 2 (Architectural Detection):** A custom YOLOv8 Object Detection model has been proudly trained on Kaggle (mAP50=0.80) over 15k FloorPlanCAD samples.
-* **Current Focus (Phase 2C):** Using the highly accurate spatial bounds of YOLO door detections to *retroactively correct* wall gaps from Phase 1 (filling missing walls, carving out undetected doors, and filtering structural noise) before placing 3D GLB assets.
+* **Phase 2 (Architectural Detection):** A custom YOLOv8 Object Detection model has been happily trained on Kaggle (mAP50=0.80) over 15k FloorPlanCAD samples.
+* **Phase 2C (Structural Correlation):** Completely implemented! High-fidelity YOLO detections retroactively project probabilistically onto Phase 1 maps, natively slicing intersections for real physically extracted door openings and placing dynamically sized furniture.
 
 ---
 

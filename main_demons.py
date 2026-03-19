@@ -54,6 +54,15 @@ def draw_vectors_on_image(image_shape, vectors, color=(0, 255, 0), thickness=2):
         cv2.line(canvas, pt1, pt2, color, thickness)
     return canvas
 
+def draw_doors_on_vector_map(canvas, detections):
+    """Draw thick colored regions for detected valid doors over the vector map."""
+    canvas_out = canvas.copy()
+    for det in detections:
+        if det.get("status") == "valid_door":
+            x_c, y_c = int(det["x_center"]), int(det["y_center"])
+            w, h = int(det["width"]), int(det["height"])
+            cv2.rectangle(canvas_out, (x_c - w//2, y_c - h//2), (x_c + w//2, y_c + h//2), (0, 165, 255), -1) # Orange filled box
+    return canvas_out
 
 def draw_yolo_detections(image, detections):
     """Draw YOLO bounding boxes with labels on a copy of the image."""
@@ -183,6 +192,7 @@ def run_demonstration(image_path, yolo_weights="best.pt", skip_yolo=False):
     # ── Step 6: YOLO detections ──
     vectors_final = vectors_5b
     detections = []
+    all_tracked_dets = []
 
     if not skip_yolo and os.path.exists(yolo_weights):
         vectors_corrected, all_tracked_dets = structural_corrector.correct_structure(image, vectors_5b, weights_path=yolo_weights)
@@ -203,6 +213,7 @@ def run_demonstration(image_path, yolo_weights="best.pt", skip_yolo=False):
 
         # ── Step 7: Post-2C vectors ──
         canvas_post2c = draw_vectors_on_image(image.shape, vectors_corrected, color=(0, 255, 128))
+        canvas_post2c = draw_doors_on_vector_map(canvas_post2c, all_tracked_dets)
         save_path = os.path.join(run_dir, f"{step:02d}_vectors_post2c.png")
         cv2.imwrite(save_path, canvas_post2c)
         print(f"  [{step:02d}] Post-2C corrected vectors ({len(vectors_corrected)} segments) saved → {save_path}")
@@ -221,7 +232,7 @@ def run_demonstration(image_path, yolo_weights="best.pt", skip_yolo=False):
     step += 1
 
     # ── Step 9: Post-correction GLB ──
-    mesh_post = pipeline.generate_3d_scene(vectors_final)
+    mesh_post = pipeline.generate_3d_scene(vectors_final, all_tracked_dets)
     if mesh_post:
         save_path = os.path.join(run_dir, f"{step:02d}_model_post_correction.glb")
         mesh_post.export(save_path)

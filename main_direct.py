@@ -81,7 +81,7 @@ def run_direct(image_path, yolo_weights="best.pt", skip_yolo=False):
         )
 
         # Export POST-correction GLB
-        mesh_post = pipeline.generate_3d_scene(vectors_corrected)
+        mesh_post = pipeline.generate_3d_scene(vectors_corrected, detections)
         if mesh_post:
             post_path = os.path.join(glb_dir, f"{basename}_post_correction.glb")
             mesh_post.export(post_path)
