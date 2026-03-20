@@ -20,8 +20,8 @@ COLLINEAR_TOL = 0.92
 DOOR_CLASSES = {
     "single_door", "double_door", "sliding_door"
 }
-IGNORED_CLASSES = {"stair", "escalator", "class_31", "railing", "wall", "parking"}
-USEFUL_CLASSES = {"single_door", "double_door", "sliding_door", "window", "bay_window", "blind_window", "opening_symbol", "bed", "half_height_cabinet", "squat_toilet", "bath", "kitchen_cabinet", "sofa", "table", "chair", "sink"}
+IGNORED_CLASSES = {"stair", "escalator", "class_31", "railing", "wall", "parking","bay_window","blind_window", "opening_symbol","squat_toilet", "bath","sink"}
+USEFUL_CLASSES = {"single_door", "double_door", "sliding_door", "window", "bed", "half_height_cabinet", "kitchen_cabinet", "sofa", "table", "chair", }
 
 def load_yolo_model(weights_path="best.pt"):
     """Load the trained YOLOv8 model."""
