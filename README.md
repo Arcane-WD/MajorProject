@@ -229,8 +229,6 @@ sample_io/
 
 ## Current Capabilities
 
-## Current Capabilities
-
 | Capability                      | Status      |
 | ------------------------------- | ----------- |
 | CNN-based wall detection        | Implemented |
