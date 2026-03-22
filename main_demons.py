@@ -195,7 +195,7 @@ def run_demonstration(image_path, yolo_weights="best.pt", skip_yolo=False):
     all_tracked_dets = []
 
     if not skip_yolo and os.path.exists(yolo_weights):
-        vectors_corrected, all_tracked_dets = structural_corrector.correct_structure(image, vectors_5b, weights_path=yolo_weights)
+        vectors_corrected, all_tracked_dets, door_cuts = structural_corrector.correct_structure(image, vectors_5b, weights_path=yolo_weights)
         vectors_final = vectors_corrected
         
         discarded_doors = [d for d in all_tracked_dets if d.get("status") == "discarded" and d["class"] in structural_corrector.DOOR_CLASSES]
@@ -224,7 +224,7 @@ def run_demonstration(image_path, yolo_weights="best.pt", skip_yolo=False):
         step += 1
 
     # ── Step 8: Pre-correction GLB ──
-    mesh_pre = pipeline.generate_3d_scene(vectors_5b)
+    mesh_pre, _ = pipeline.generate_3d_scene(vectors_5b)
     if mesh_pre:
         save_path = os.path.join(run_dir, f"{step:02d}_model_pre_correction.glb")
         mesh_pre.export(save_path)
@@ -232,7 +232,7 @@ def run_demonstration(image_path, yolo_weights="best.pt", skip_yolo=False):
     step += 1
 
     # ── Step 9: Post-correction GLB ──
-    mesh_post = pipeline.generate_3d_scene(vectors_final, all_tracked_dets)
+    mesh_post, _ = pipeline.generate_3d_scene(vectors_final, all_tracked_dets, door_cuts if 'door_cuts' in locals() else None)
     if mesh_post:
         save_path = os.path.join(run_dir, f"{step:02d}_model_post_correction.glb")
         mesh_post.export(save_path)

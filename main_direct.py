@@ -68,7 +68,7 @@ def run_direct(image_path, yolo_weights="best.pt", skip_yolo=False):
     print(f"  [Geometry] {len(vectors_raw)} vectors after Phase 5B")
 
     # 5. Export PRE-correction GLB
-    mesh_pre = pipeline.generate_3d_scene(vectors_raw)
+    mesh_pre, _ = pipeline.generate_3d_scene(vectors_raw)
     if mesh_pre:
         pre_path = os.path.join(glb_dir, f"{basename}_pre_correction.glb")
         mesh_pre.export(pre_path)
@@ -76,12 +76,12 @@ def run_direct(image_path, yolo_weights="best.pt", skip_yolo=False):
 
     # 6. Structural Correction (Phase 2C)
     if not skip_yolo and os.path.exists(yolo_weights):
-        vectors_corrected, detections = structural_corrector.correct_structure(
+        vectors_corrected, detections, door_cuts = structural_corrector.correct_structure(
             image, vectors_raw, weights_path=yolo_weights
         )
 
         # Export POST-correction GLB
-        mesh_post = pipeline.generate_3d_scene(vectors_corrected, detections)
+        mesh_post, _ = pipeline.generate_3d_scene(vectors_corrected, detections, door_cuts)
         if mesh_post:
             post_path = os.path.join(glb_dir, f"{basename}_post_correction.glb")
             mesh_post.export(post_path)

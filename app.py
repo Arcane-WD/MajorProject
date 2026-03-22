@@ -51,7 +51,297 @@ def render_3d_viewer(glb_bytes, height=500):
       </body>
     </html>
     """
-    st.components.v1.html(html_code, height=height)
+    import streamlit.components.v1 as components
+    components.html(html_code, height=height)
+
+def render_navigation_viewer(glb_bytes, door_metadata, wall_vectors_px, height=700):
+    import json
+    
+    glb_b64 = base64.b64encode(glb_bytes).decode("utf-8")
+    door_json = json.dumps(door_metadata)
+    
+    walls_json = json.dumps([
+        [[float(p1[0] * pipeline.PIXEL_TO_METER), float(-p1[1] * pipeline.PIXEL_TO_METER)],
+         [float(p2[0] * pipeline.PIXEL_TO_METER), float(-p2[1] * pipeline.PIXEL_TO_METER)]]
+        for p1, p2 in wall_vectors_px
+    ])
+    
+    # Calculate Spawn Point (Centroid of all wall endpoints)
+    if wall_vectors_px:
+        pts = np.array([p for pair in wall_vectors_px for p in pair]) * pipeline.PIXEL_TO_METER
+        start_x, start_z = float(np.mean(pts[:, 0])), float(-np.mean(pts[:, 1]))
+    else:
+        start_x, start_z = 0.0, 0.0
+        
+    html = f"""
+    <script src="https://cdn.babylonjs.com/babylon.js"></script>
+    <script src="https://cdn.babylonjs.com/loaders/babylonjs.loaders.min.js"></script>
+    
+    <style>
+        #container {{ position: relative; width: 100%; height: {height}px; 
+                      background: #1a1a2e; overflow: hidden; border-radius: 10px; }}
+        #renderCanvas {{ width: 100%; height: 100%; touch-action: none; outline: none; cursor: crosshair; }}
+        #minimap {{ position: absolute; top: 12px; right: 12px; 
+                   width: 200px; height: 200px; background: rgba(0,0,0,0.5);
+                   border: 1px solid rgba(255,255,255,0.3);
+                   border-radius: 4px; pointer-events: none; }}
+        #hud {{ position: absolute; top: 50%; left: 50%; 
+                transform: translate(-50%, -50%);
+                color: rgba(255,255,255,0.8); pointer-events: none; }}
+        #crosshair {{ width: 8px; height: 8px; border: 2px solid white;
+                      border-radius: 50%; box-shadow: 0 0 4px rgba(0,0,0,0.5); }}
+        #hint {{ position: absolute; bottom: 16px; left: 50%;
+                 transform: translateX(-50%);
+                 color: rgba(255,255,255,0.7); font-size: 14px;
+                 font-family: monospace; pointer-events: none; 
+                 background: rgba(0,0,0,0.5); padding: 5px 10px; border-radius: 5px; }}
+        #room-label {{ position: absolute; top: 16px; left: 16px;
+                       color: white; font-size: 15px; font-family: monospace;
+                       background: rgba(0,0,0,0.5); padding: 5px 10px;
+                       border-radius: 4px; pointer-events: none; }}
+        #fullscreenBtn {{ position: absolute; top: 16px; right: 220px;
+                         background: rgba(0,0,0,0.6); border: 1px solid rgba(255,255,255,0.3);
+                         color: white; padding: 6px 12px; border-radius: 4px;
+                         cursor: pointer; font-size: 14px; font-family: monospace; z-index: 10; }}
+        #fullscreenBtn:hover {{ background: rgba(255,255,255,0.15); }}
+    </style>
+    
+    <div id="container">
+        <canvas id="renderCanvas"></canvas>
+        <canvas id="minimap" width="200" height="200"></canvas>
+        <div id="hud"><div id="crosshair"></div></div>
+        <div id="hint">Right-click drag to look \u00b7 WASD to move \u00b7 Left-click doors to open</div>
+        <div id="room-label">Interactive BIM Navigator</div>
+        <button id="fullscreenBtn" onclick="toggleFS()">\u26F6 Fullscreen</button>
+    </div>
+    
+    <script>
+        const container = document.getElementById("container");
+        const canvas = document.getElementById("renderCanvas");
+        const engine = new BABYLON.Engine(canvas, true);
+        const scene = new BABYLON.Scene(engine);
+        
+        scene.useRightHandedSystem = true; 
+        scene.clearColor = new BABYLON.Color4(0.08, 0.08, 0.18, 1.0);
+        
+        const START_X = {start_x};
+        const START_Z = {start_z};
+        const GLB_B64 = "{glb_b64}";
+        const DOOR_META = {door_json};
+        const WALL_VECTORS = {walls_json};
+        
+        // ========== Fullscreen Toggle ==========
+        function toggleFS() {{
+            if (!document.fullscreenElement) {{
+                container.requestFullscreen().catch(err => {{}});
+            }} else {{
+                document.exitFullscreen();
+            }}
+        }}
+        document.addEventListener("fullscreenchange", () => {{ engine.resize(); }});
+        
+        // ========== Camera ==========
+        const camera = new BABYLON.UniversalCamera("fps", new BABYLON.Vector3(START_X, 1.6, START_Z), scene);
+        camera.setTarget(new BABYLON.Vector3(START_X, 1.6, START_Z + 1));
+        camera.attachControl(canvas, true);
+        
+        camera.keysUp = [87];    // W
+        camera.keysDown = [83];  // S
+        camera.keysLeft = [65];  // A
+        camera.keysRight = [68]; // D
+        camera.speed = 0.15;
+        camera.angularSensibility = 2000;
+        
+        camera.checkCollisions = true;
+        camera.applyGravity = true;
+        camera.ellipsoid = new BABYLON.Vector3(0.3, 0.8, 0.3);
+        scene.gravity = new BABYLON.Vector3(0, -9.81, 0);
+        
+        // ========== Mouse Look via Right-Click Drag ==========
+        let isDragging = false;
+        let lastMouseX = 0, lastMouseY = 0;
+        const MOUSE_SENS = 0.003;
+        
+        canvas.addEventListener("mousedown", (e) => {{
+            if (e.button === 2) {{  // Right-click to drag
+                isDragging = true;
+                lastMouseX = e.clientX;
+                lastMouseY = e.clientY;
+                e.preventDefault();
+            }}
+        }});
+        canvas.addEventListener("mouseup", (e) => {{
+            if (e.button === 2) isDragging = false;
+        }});
+        canvas.addEventListener("mousemove", (e) => {{
+            if (isDragging) {{
+                const dx = e.clientX - lastMouseX;
+                const dy = e.clientY - lastMouseY;
+                camera.rotation.y += dx * MOUSE_SENS;
+                camera.rotation.x += dy * MOUSE_SENS;
+                camera.rotation.x = Math.max(-Math.PI/2.5, Math.min(Math.PI/2.5, camera.rotation.x));
+                lastMouseX = e.clientX;
+                lastMouseY = e.clientY;
+            }}
+        }});
+        canvas.addEventListener("contextmenu", (e) => e.preventDefault());
+        
+        // ========== Lights ==========
+        const light = new BABYLON.HemisphericLight("light", new BABYLON.Vector3(0, 1, 0), scene);
+        light.intensity = 1.0;
+        const light2 = new BABYLON.HemisphericLight("light2", new BABYLON.Vector3(0, -1, 0), scene);
+        light2.intensity = 0.3;
+        
+        // ========== Load GLB ==========
+        BABYLON.SceneLoader.ImportMesh(
+            "", "", "data:model/gltf-binary;base64," + GLB_B64,
+            scene,
+            (meshes) => {{
+                meshes.forEach(mesh => {{
+                    mesh.checkCollisions = true;
+                }});
+            }}
+        );
+        
+        // ========== Door System with Hinge Pivot ==========
+        const doors = {{}};
+        DOOR_META.forEach(door => {{
+            const bx = door.center_m[0];
+            const by = door.height_m / 2.0;
+            const bz = door.center_m[1];
+            const wallAngle = door.wall_angle_rad;
+            const halfW = door.width_m / 2.0;
+            
+            // 1. Create a pivot TransformNode at the HINGE EDGE of the door
+            const pivot = new BABYLON.TransformNode(door.id + "_pivot", scene);
+            // Hinge position = door center offset by half-width along the wall direction
+            const hingeX = bx - Math.cos(wallAngle) * halfW;
+            const hingeZ = bz + Math.sin(wallAngle) * halfW;
+            pivot.position = new BABYLON.Vector3(hingeX, 0, hingeZ);
+            pivot.rotation.y = -wallAngle;
+            
+            // 2. Create the door panel, offset from pivot so it swings from the edge
+            const panel = BABYLON.MeshBuilder.CreateBox(door.id, {{
+                width: door.width_m,
+                height: door.height_m,
+                depth: 0.08
+            }}, scene);
+            
+            const mat = new BABYLON.StandardMaterial(door.id + "_mat", scene);
+            mat.diffuseColor = new BABYLON.Color3(0.45, 0.25, 0.10);
+            mat.specularColor = new BABYLON.Color3(0.1, 0.1, 0.1);
+            panel.material = mat;
+            
+            // Offset panel so its edge aligns with the pivot point (the hinge)
+            panel.parent = pivot;
+            panel.position = new BABYLON.Vector3(halfW, by, 0);
+            panel.checkCollisions = true;
+            
+            doors[door.id] = {{
+                pivot: pivot,
+                mesh: panel,
+                isOpen: false,
+                baseAngle: pivot.rotation.y
+            }};
+        }});
+        
+        // ========== Door Interaction — Left-Click Raycast ==========
+        scene.onPointerDown = (evt) => {{
+            if (evt.button !== 0) return;  // Left-click only
+            const ray = scene.createPickingRay(
+                engine.getRenderWidth() / 2,
+                engine.getRenderHeight() / 2,
+                BABYLON.Matrix.Identity(),
+                camera
+            );
+            const hit = scene.pickWithRay(ray);
+            if (hit.pickedMesh) {{
+                // Check if the picked mesh is a door panel
+                const doorId = hit.pickedMesh.name;  
+                if (doors[doorId]) {{
+                    const door = doors[doorId];
+                    const dist = BABYLON.Vector3.Distance(camera.position, hit.pickedPoint);
+                    if (dist < 3.0) {{  // 3m interaction radius
+                        const targetAngle = door.isOpen ? door.baseAngle : door.baseAngle + Math.PI / 2;
+                        BABYLON.Animation.CreateAndStartAnimation(
+                            "doorSwing", door.pivot, "rotation.y",
+                            60, 24,
+                            door.pivot.rotation.y, targetAngle,
+                            BABYLON.Animation.ANIMATIONLOOPMODE_CONSTANT
+                        );
+                        door.isOpen = !door.isOpen;
+                        door.mesh.checkCollisions = !door.isOpen;
+                    }}
+                }}
+            }}
+        }};
+        
+        // ========== Minimap ==========
+        const mmCanvas = document.getElementById("minimap");
+        const mmCtx = mmCanvas.getContext("2d");
+        const MM_SIZE = 200;
+        const MM_PAD = 10;
+        
+        let minX = Infinity, minZ = Infinity;
+        let maxX = -Infinity, maxZ = -Infinity;
+        WALL_VECTORS.forEach(pair => {{
+            pair.forEach(pt => {{
+                minX = Math.min(minX, pt[0]); minZ = Math.min(minZ, pt[1]);
+                maxX = Math.max(maxX, pt[0]); maxZ = Math.max(maxZ, pt[1]);
+            }});
+        }});
+        
+        const mmScaleX = (MM_SIZE - MM_PAD*2) / (maxX - minX || 1);
+        const mmScaleZ = (MM_SIZE - MM_PAD*2) / (maxZ - minZ || 1);
+        const mmScale = Math.min(mmScaleX, mmScaleZ);
+        
+        function worldToMinimap(wx, wz) {{
+            return {{
+                x: MM_PAD + (wx - minX) * mmScale,
+                y: MM_PAD + (wz - minZ) * mmScale
+            }};
+        }}
+        
+        const wallCache = document.createElement("canvas");
+        wallCache.width = wallCache.height = MM_SIZE;
+        const wcCtx = wallCache.getContext("2d");
+        wcCtx.fillStyle = "rgba(20, 20, 40, 0.85)";
+        wcCtx.fillRect(0, 0, MM_SIZE, MM_SIZE);
+        wcCtx.strokeStyle = "rgba(255,255,255,0.8)";
+        wcCtx.lineWidth = 2.0;
+        WALL_VECTORS.forEach(pair => {{
+            const p1 = worldToMinimap(pair[0][0], pair[0][1]);
+            const p2 = worldToMinimap(pair[1][0], pair[1][1]);
+            wcCtx.beginPath(); wcCtx.moveTo(p1.x, p1.y); wcCtx.lineTo(p2.x, p2.y); wcCtx.stroke();
+        }});
+        wcCtx.fillStyle = "#FFA500";
+        Object.values(doors).forEach(door => {{
+            const pos = worldToMinimap(door.pivot.position.x, door.pivot.position.z);
+            wcCtx.fillRect(pos.x - 3, pos.y - 3, 6, 6);
+        }});
+        
+        // ========== Render Loop ==========
+        engine.runRenderLoop(() => {{
+            scene.render();
+            mmCtx.clearRect(0, 0, MM_SIZE, MM_SIZE);
+            mmCtx.drawImage(wallCache, 0, 0);
+            
+            const pPos = worldToMinimap(camera.position.x, camera.position.z);
+            mmCtx.fillStyle = "#4FC3F7";
+            mmCtx.beginPath(); mmCtx.arc(pPos.x, pPos.y, 4, 0, Math.PI * 2); mmCtx.fill();
+            
+            const fwd = camera.getForwardRay().direction;
+            mmCtx.strokeStyle = "#4FC3F7";
+            mmCtx.lineWidth = 2.0;
+            mmCtx.beginPath(); mmCtx.moveTo(pPos.x, pPos.y); 
+            mmCtx.lineTo(pPos.x + fwd.x * 12, pPos.y + fwd.z * 12); mmCtx.stroke();
+        }});
+        
+        window.addEventListener("resize", () => engine.resize());
+    </script>
+    """
+    import streamlit.components.v1 as components
+    components.html(html, height=height)
 
 # --- HELPERS ---
 def draw_vectors_on_image(shape, vectors, color=(0, 255, 0), thickness=2):
@@ -96,6 +386,7 @@ def mesh_to_glb_bytes(mesh):
         with open(tmp.name, "rb") as f:
             return f.read()
 
+
 # --- MAIN ---
 def main():
     st.title("🏗️ Scan-to-BIM: AI Floorplan Reconstructor")
@@ -123,6 +414,15 @@ def main():
         st.sidebar.caption("✅ **Metric Mode:** Preserves original scale.")
 
     uploaded_file = st.sidebar.file_uploader("Upload Floor Plan", type=["png", "jpg", "jpeg"])
+    if uploaded_file:
+        file_id = f"{uploaded_file.name}_{uploaded_file.size}"
+        if st.session_state.get("last_file_id") != file_id:
+            # New file uploaded — clear previous results
+            for key in ["glb_bytes", "door_meta", "vectors",
+                        "demo_glb_post", "demo_glb_pre", "demo_door_meta", "demo_vectors"]:
+                st.session_state.pop(key, None)
+            st.session_state["last_file_id"] = file_id
+            
 
     yolo_available = os.path.exists("best.pt")
     if yolo_available:
@@ -147,6 +447,12 @@ def main():
         with col1:
             st.image(image_rgb, caption=f"Input ({image.shape[1]}×{image.shape[0]})", width="stretch")
             run_btn = st.button("Generate 3D Model", type="primary", width="stretch")
+            # Viewer toggle lives OUTSIDE the run_btn block
+            viewer_mode = st.radio(
+                "Viewer Mode",
+                ["🔭 Passive (model-viewer)", "🎮 Navigate (First-Person)"],
+                horizontal=True
+            )
 
         if run_btn:
             # Perception
@@ -164,26 +470,55 @@ def main():
             with st.spinner("Extracting Geometry..."):
                 bgr = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR) if yolo_available else None
                 yolo_w = "best.pt" if yolo_available else None
-                vectors, detections = pipeline.process_geometry(mask, original_image=bgr, yolo_weights=yolo_w)
+                vectors, detections, door_cuts = pipeline.process_geometry( mask, original_image=bgr, yolo_weights=yolo_w)
 
             # 3D
+            # 3D
             with st.spinner("Building interactive 3D model..."):
-                mesh = pipeline.generate_3d_scene(vectors, detections)
-                if mesh:
-                    glb_bytes = mesh_to_glb_bytes(mesh)
+                # Generate Passive Mesh (Static doors baked in)
+                mesh_passive, door_meta = pipeline.generate_3d_scene(vectors, detections, door_cuts, bake_doors=True)
+                # Generate Navigation Mesh (No static doors, leaves gaps for JS)
+                mesh_nav, _ = pipeline.generate_3d_scene(vectors, detections, door_cuts, bake_doors=False)
+                
+                if mesh_passive and mesh_nav:
+                    # Store both versions in session state
+                    st.session_state["glb_bytes_passive"] = mesh_to_glb_bytes(mesh_passive)
+                    st.session_state["glb_bytes_nav"] = mesh_to_glb_bytes(mesh_nav)
+                    st.session_state["door_meta"] = door_meta
+                    st.session_state["vectors"] = vectors
+                    
                     with col2:
                         det_msg = f" · {len(detections)} icons detected" if detections else ""
                         st.success(f"✅ {len(vectors)} walls reconstructed{det_msg}")
-                        render_3d_viewer(glb_bytes)
-                        st.download_button("📥 Download GLB", glb_bytes, "floorplan.glb", "model/gltf-binary")
                 else:
                     st.error("No geometry detected.")
 
+        if "glb_bytes_passive" in st.session_state:
+            with col2:
+                det_msg = f" · {len(st.session_state.get('door_meta', []))} doors" if st.session_state.get('door_meta') else ""
+                st.success(f"✅ Model ready{det_msg}")
+                
+                # Dynamically load the correct GLB based on the viewer selected
+                if viewer_mode.startswith("🔭"):
+                    render_3d_viewer(st.session_state["glb_bytes_passive"])
+                else:
+                    render_navigation_viewer(
+                        st.session_state["glb_bytes_nav"],
+                        st.session_state.get("door_meta", []),
+                        st.session_state.get("vectors", [])
+                    )
+                st.download_button("📥 Download GLB", st.session_state["glb_bytes_passive"],
+                                "floorplan.glb", "model/gltf-binary")
     # ============================
     #  DEMONSTRATIVE MODE
     # ============================
     else:
         st.image(image_rgb, caption=f"Input ({image.shape[1]}×{image.shape[0]})", width="stretch")
+        viewer_mode = st.radio(
+            "Viewer Mode",
+            ["🔭 Passive (model-viewer)", "🎮 Navigate (First-Person)"],
+            horizontal=True
+        )
         run_btn = st.button("🔬 Run Full Demonstration Pipeline", type="primary", width="stretch")
 
         if run_btn:
@@ -263,11 +598,12 @@ def main():
             vectors_final = vectors_5b
             detections = []
             all_tracked_dets = []
+            door_cuts = []
 
             if yolo_available:
                 with st.status("Stage 4: YOLOv8 Detection & Structural Correction", expanded=True) as status:
                     is_fast = (inference_mode == "Fast (512px)")
-                    vectors_corrected, all_tracked_dets = structural_corrector.correct_structure(image, vectors_5b, is_fast_mode=is_fast)
+                    vectors_corrected, all_tracked_dets, door_cuts = structural_corrector.correct_structure(image, vectors_5b, is_fast_mode=is_fast)
                     
                     discarded_doors = [d for d in all_tracked_dets if d.get("status") == "discarded" and d["class"] in structural_corrector.DOOR_CLASSES]
                     valid_doors = [d for d in all_tracked_dets if d.get("status") == "valid_door"]
@@ -303,32 +639,64 @@ def main():
 
             # ── Stage 5: 3D Model Generation ──
             with st.status("Stage 5: 3D Model Construction", expanded=True) as status:
-                mesh_pre = pipeline.generate_3d_scene(vectors_5b)
-                mesh_post = pipeline.generate_3d_scene(vectors_final, all_tracked_dets)
+                mesh_pre, _ = pipeline.generate_3d_scene(vectors_5b)
+                # Passive mode: bake doors into the GLB mesh
+                mesh_post_passive, door_meta = pipeline.generate_3d_scene(vectors_final, all_tracked_dets, door_cuts, bake_doors=True)
+                # Navigation mode: doors are spawned by Babylon.js, so DON'T bake them into the GLB
+                mesh_post_nav, _ = pipeline.generate_3d_scene(vectors_final, all_tracked_dets, door_cuts, bake_doors=False)
                 
-                c1_3d, c2_3d = st.columns(2)
-                if mesh_pre and mesh_post and yolo_available:
+                viewer_mode = st.radio(
+                    "Viewer Mode",
+                    ["🔭 Passive (model-viewer)", "🎮 Navigate (First-Person)"],
+                    horizontal=True,
+                    key="viewer_mode_stage5"
+                )
+                
+                is_nav = viewer_mode.startswith("🎮")
+                
+                if mesh_pre and mesh_post_passive and yolo_available:
                     glb_pre = mesh_to_glb_bytes(mesh_pre)
-                    glb_post = mesh_to_glb_bytes(mesh_post)
+                    glb_post_passive = mesh_to_glb_bytes(mesh_post_passive)
+                    glb_post_nav = mesh_to_glb_bytes(mesh_post_nav) if mesh_post_nav else glb_post_passive
 
                     st.subheader("Pre-Correction Model")
-                    render_3d_viewer(glb_pre, height=450)
+                    if not is_nav:
+                        render_3d_viewer(glb_pre, height=450)
+                    else:
+                        render_navigation_viewer(glb_pre, [], vectors_5b, height=450)
+                        
                     st.download_button("📥 Download Pre-Correction GLB", glb_pre,
                                        "floorplan_pre.glb", "model/gltf-binary", key="dl_pre")
 
                     st.subheader("Post-Correction Model")
-                    render_3d_viewer(glb_post, height=450)
-                    st.download_button("📥 Download Post-Correction GLB", glb_post,
+                    if not is_nav:
+                        render_3d_viewer(glb_post_passive, height=450)
+                    else:
+                        render_navigation_viewer(glb_post_nav, door_meta, vectors_final, height=700)
+                        
+                    st.download_button("📥 Download Post-Correction GLB", glb_post_passive,
                                        "floorplan_post.glb", "model/gltf-binary", key="dl_post")
-                elif mesh_post:
-                    glb_post = mesh_to_glb_bytes(mesh_post)
-                    render_3d_viewer(glb_post)
-                    st.download_button("📥 Download GLB", glb_post,
+                elif mesh_post_passive:
+                    glb_post_passive = mesh_to_glb_bytes(mesh_post_passive)
+                    glb_post_nav = mesh_to_glb_bytes(mesh_post_nav) if mesh_post_nav else glb_post_passive
+                    if not is_nav:
+                        render_3d_viewer(glb_post_passive)
+                    else:
+                        render_navigation_viewer(glb_post_nav, door_meta, vectors_final, height=700)
+                    st.download_button("📥 Download GLB", glb_post_passive,
                                        "floorplan.glb", "model/gltf-binary")
                 else:
                     st.error("No geometry detected.")
 
                 status.update(label="Stage 5: Complete ✅", state="complete")
+                if mesh_post_nav:
+                    st.session_state["demo_glb_nav"] = mesh_to_glb_bytes(mesh_post_nav)
+                if mesh_post_passive:
+                    st.session_state["demo_glb_post"] = mesh_to_glb_bytes(mesh_post_passive)
+                    st.session_state["demo_door_meta"] = door_meta
+                    st.session_state["demo_vectors"] = vectors_final
+                if mesh_pre:
+                    st.session_state["demo_glb_pre"] = mesh_to_glb_bytes(mesh_pre)
 
             # ── Summary ──
             st.divider()
@@ -337,6 +705,24 @@ def main():
                 f"{len(final_raw)} raw → {len(vectors_5b)} post-5B → {len(vectors_final)} final vectors"
                 + (f" · {len(detections)} YOLO detections used" if detections else "")
             )
+        
+        if "demo_glb_post" in st.session_state:
+            viewer_mode = st.radio(
+                "Viewer Mode",
+                ["🔭 Passive (model-viewer)", "🎮 Navigate (First-Person)"],
+                horizontal=True,
+                key="demo_viewer_mode_after_run"
+            )
+            st.subheader("Post-Correction Model")
+            if viewer_mode.startswith("🔭"):
+                render_3d_viewer(st.session_state["demo_glb_post"], height=450)
+            else:
+                render_navigation_viewer(
+                    st.session_state.get("demo_glb_nav", st.session_state["demo_glb_post"]),
+                    st.session_state.get("demo_door_meta", []),
+                    st.session_state.get("demo_vectors", []),
+                    height=700
+                )
 
 
 if __name__ == "__main__":

@@ -502,13 +502,14 @@ def process_geometry(mask, original_image=None, yolo_weights=None):
 
     # Phase 2C: Structural Correction (if YOLO weights available)
     detections = []
+    door_cuts = []
     if original_image is not None and yolo_weights is not None:
         import structural_corrector
-        final_vectors, detections = structural_corrector.correct_structure(
+        final_vectors, detections, door_cuts = structural_corrector.correct_structure(
             original_image, final_vectors, weights_path=yolo_weights
         )
     
-    return final_vectors, detections
+    return final_vectors, detections, door_cuts
 
 def create_box(p1, p2, thickness, height, z_offset=0):
     p1, p2 = np.array(p1), np.array(p2)
@@ -554,36 +555,34 @@ def point_to_segment_dist(pt, v, w):
     return np.linalg.norm(pt - projection), projection
 
 FURNITURE_ASSETS = {
-    "bed": ("bedDouble.glb", [2.0, 1.4]),
-    "squat_toilet": ("toilet.glb", [0.7, 0.5]),
-    "bath": ("bathtub.glb", [1.7, 0.8]),
-    "half_height_cabinet": ("sideTable.glb", [0.6, 0.6]),
-    "kitchen_cabinet": ("kitchenCabinet.glb", [0.6, 0.6]),
-    "sofa": ("loungeSofa.glb", [2.0, 0.9]),
-    "table": ("table.glb", [1.5, 0.9]),
-    "chair": ("chair.glb", [0.5, 0.5]),
-    "sink": ("bathroomSink.glb", [0.6, 0.5])
+    "bed": ("bedDouble.glb", [2.8, 2.0]),
+    "squat_toilet": ("toilet.glb", [1.0, 0.7]),
+    "bath": ("bathtub.glb", [2.4, 1.2]),
+    "half_height_cabinet": ("sideTable.glb", [0.9, 0.9]),
+    "kitchen_cabinet": ("kitchenCabinet.glb", [0.9, 0.9]),
+    "sofa": ("loungeSofa.glb", [2.8, 1.3]),
+    "table": ("table.glb", [2.0, 1.2]),
+    "chair": ("chair.glb", [0.7, 0.7]),
+    "sink": ("bathroomSink.glb", [0.9, 0.7])
 }
 
 DOOR_CLASSES = {"single_door", "double_door", "sliding_door"}
 
 import os
 
-def place_architectural_elements(detections, scaled_wall_vectors, scene_meshes):
+# --- IN pipeline.py ---
+
+def place_architectural_elements(detections, scaled_wall_vectors, scene_meshes, bake_doors=True):
     """
     Places 3D doors and furniture into the scene based on YOLO detections.
-    Uses canonical real-world dimensions for assets and snaps to closest walls.
     """
     for det in detections:
-        # We only place elements that were considered valid (or we can place all that pass confidence)
         if det.get("status") == "ignored":
             continue
             
         cls = det["class"]
         center_px = np.array([det["x_center"], det["y_center"]])
         center_m = center_px * PIXEL_TO_METER
-        
-        # Determine bbox physical orientation preference
         bbox_aspect = det["width"] / (det["height"] + 1e-5)
         
         # 1. Find Closest Wall for Rotation Snapping
@@ -593,16 +592,14 @@ def place_architectural_elements(detections, scaled_wall_vectors, scene_meshes):
         
         for w1, w2 in scaled_wall_vectors:
             dist, proj = point_to_segment_dist(center_m, w1, w2)
-            
             wall_dir = w2 - w1
             n = np.linalg.norm(wall_dir)
             if n > 1e-5:
                 w_norm = wall_dir / n
-                # Penalize perpendicular walls based on bbox aspect
                 if cls in DOOR_CLASSES:
-                    if bbox_aspect > 1.2 and abs(w_norm[1]) > 0.707: # Door is horizontal, wall is vertical
+                    if bbox_aspect > 1.2 and abs(w_norm[1]) > 0.707: 
                         dist += 0.3
-                    elif bbox_aspect < 0.8 and abs(w_norm[0]) > 0.707: # Door is vertical, wall is horizontal
+                    elif bbox_aspect < 0.8 and abs(w_norm[0]) > 0.707: 
                         dist += 0.3
                         
             if dist < best_dist:
@@ -613,9 +610,8 @@ def place_architectural_elements(detections, scaled_wall_vectors, scene_meshes):
 
         wall_angle = np.arctan2(best_wall_vec[1], best_wall_vec[0])
 
-        # 2. Place DOORS (Colored Intersecting Blocks for Visualization)
-        if cls in DOOR_CLASSES:
-            # Clamp door widths to realistic architectural scales (0.7m to 1.5m)
+        # 2. Place DOORS (Only if bake_doors is True)
+        if cls in DOOR_CLASSES and bake_doors:
             raw_width = det["width"] * PIXEL_TO_METER
             door_width_m = max(0.7, min(1.5, raw_width))
             
@@ -627,14 +623,11 @@ def place_architectural_elements(detections, scaled_wall_vectors, scene_meshes):
             box.apply_translation([best_proj[0], best_proj[1], DOOR_HEIGHT / 2])
             scene_meshes.append(box)
             
-        # 3. Place FURNITURE (GLB Loads with Fallbacks)
+        # 3. Place FURNITURE (Always baked into the model)
         elif cls in FURNITURE_ASSETS:
             asset_name, (length_m, width_m) = FURNITURE_ASSETS[cls]
             asset_path = os.path.join("assets", "furniture", "kenney_furniture-kit", "Models", "GLTF format", asset_name)
             
-            bbox_aspect = det["width"] / (det["height"] + 1e-5)
-            
-            # Snap rotation: align dominant axis of bbox to the wall orientation
             rot_angle = wall_angle
             if bbox_aspect < 0.8 and abs(np.cos(wall_angle)) > 0.707:
                 rot_angle += np.pi / 2
@@ -648,42 +641,32 @@ def place_architectural_elements(detections, scaled_wall_vectors, scene_meshes):
                     if not geom: raise ValueError("Empty scene")
                     mesh = trimesh.util.concatenate(geom)
                 
-                # Scale the model to fit canonical footprint dimensions
                 extents = mesh.extents
                 scale_x = length_m / (extents[0] if extents[0] > 0 else 1)
-                scale_z = width_m / (extents[2] if extents[2] > 0 else 1) # footprint is XZ for natively Y-up models
+                scale_z = width_m / (extents[2] if extents[2] > 0 else 1) 
                 
                 scale_matrix = np.eye(4)
                 scale_matrix[0,0], scale_matrix[1,1], scale_matrix[2,2] = scale_x, min(scale_x, scale_z), scale_z
                 mesh.apply_transform(scale_matrix)
-                
-                # Apply a 90-degree X-rotation to make Y-up models strictly Z-up
                 mesh.apply_transform(trimesh.transformations.rotation_matrix(np.pi/2, [1, 0, 0]))
                 
-                # Align bottom center to origin before translating
                 bounds = mesh.bounds
-                center_offset = [-(bounds[0][0] + bounds[1][0])/2,
-                                 -(bounds[0][1] + bounds[1][1])/2,
-                                 -bounds[0][2]]
+                center_offset = [-(bounds[0][0] + bounds[1][0])/2, -(bounds[0][1] + bounds[1][1])/2, -bounds[0][2]]
                 mesh.apply_translation(center_offset)
-                
                 mesh.apply_transform(trimesh.transformations.rotation_matrix(rot_angle, [0,0,1]))
-                # Use raw detection center, not projected (since furniture sits in rooms)
                 mesh.apply_translation([center_m[0], center_m[1], 0]) 
                 scene_meshes.append(mesh)
                 
             except Exception as e:
-                # Robust fallback primitive if asset fails
                 print(f"  [3D] Failed to load {asset_path}, using static block. ({e})")
-                
                 bbox_w_m = det["width"] * PIXEL_TO_METER
                 bbox_h_m = det["height"] * PIXEL_TO_METER
-                
                 box = trimesh.creation.box(extents=[bbox_w_m, bbox_h_m, 1.0])
                 mat = trimesh.visual.material.PBRMaterial(baseColorFactor=[100, 149, 237, 255], metallicFactor=0.0, roughnessFactor=1.0)
                 box.visual = trimesh.visual.TextureVisuals(material=mat)
                 box.apply_translation([center_m[0], center_m[1], 0.5])
                 scene_meshes.append(box)
+
 
 def generate_wall_geometry(vectors):
     scene_meshes = []
@@ -696,7 +679,7 @@ def generate_wall_geometry(vectors):
         scaled_vectors.append((s_p1, s_p2))
         wall = create_box(s_p1, s_p2, WALL_THICKNESS, WALL_HEIGHT)
         if wall:
-            mat = trimesh.visual.material.PBRMaterial(baseColorFactor=[180, 180, 180, 255], metallicFactor=0.0, roughnessFactor=1.0)
+            mat = trimesh.visual.material.PBRMaterial(baseColorFactor=[255, 255, 255, 255], metallicFactor=0.0, roughnessFactor=0.9)
             wall.visual = trimesh.visual.TextureVisuals(material=mat)
             scene_meshes.append(wall)
             
@@ -728,21 +711,40 @@ def generate_wall_geometry(vectors):
         cx, cy = (max_x + min_x)/2, (max_y + min_y)/2
         floor = trimesh.creation.box(extents=[w, d, 0.2])
         floor.apply_translation([cx, cy, -0.1])
-        mat = trimesh.visual.material.PBRMaterial(baseColorFactor=[60, 60, 60, 255], metallicFactor=0.0, roughnessFactor=1.0)
+        mat = trimesh.visual.material.PBRMaterial(baseColorFactor=[65, 40, 25, 255], metallicFactor=0.0, roughnessFactor=0.85)
         floor.visual = trimesh.visual.TextureVisuals(material=mat)
         scene_meshes.append(floor)
         
     return scene_meshes, scaled_vectors
 
-def generate_3d_scene(vectors, detections=None):
+# --- Update generate_3d_scene to pass the flag down ---
+def generate_3d_scene(vectors, detections=None, door_cuts=None, bake_doors=True):
     scene_meshes, scaled_vectors = generate_wall_geometry(vectors)
     
+    door_metadata = []
+    if door_cuts:
+        for i, (start_px, end_px, wall_dir) in enumerate(door_cuts):
+            center_px = (np.array(start_px) + np.array(end_px)) / 2.0
+            center_m = center_px * PIXEL_TO_METER
+            width_m = np.linalg.norm(np.array(end_px) - np.array(start_px)) * PIXEL_TO_METER
+            
+            door_metadata.append({
+                "id": f"door_{i}",
+                "center_m": [float(center_m[0]), float(-center_m[1])], 
+                "wall_angle_rad": float(np.arctan2(wall_dir[1], wall_dir[0])),
+                "width_m": float(width_m),
+                "height_m": float(DOOR_HEIGHT)
+            })
+            
+    # FIX: Always call place_architectural_elements if detections exist, pass the bake_doors flag
     if detections:
-        place_architectural_elements(detections, scaled_vectors, scene_meshes)
+        place_architectural_elements(detections, scaled_vectors, scene_meshes, bake_doors=bake_doors)
 
-    if not scene_meshes: return None
+    if not scene_meshes:
+        return None, []
 
     combined_mesh = trimesh.util.concatenate(scene_meshes)
     rotation = trimesh.transformations.rotation_matrix(-np.pi/2, [1, 0, 0])
     combined_mesh.apply_transform(rotation)
-    return combined_mesh
+    
+    return combined_mesh, door_metadata

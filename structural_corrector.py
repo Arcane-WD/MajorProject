@@ -272,6 +272,7 @@ def carve_doors_out_of_walls(vectors, door_detections):
     """
     valid_doors = [d for d in door_detections if d.get("status") == "valid_door"]
     modified_vectors = list(vectors)
+    door_cuts = []
     
     doors_carved = 0
 
@@ -365,10 +366,12 @@ def carve_doors_out_of_walls(vectors, door_detections):
         for seg in reversed(new_segments):
             modified_vectors.insert(best_wall_idx, seg)
             
+        door_cuts.append((tuple(cut_start_pt), tuple(cut_end_pt), tuple(wall_dir)))
+            
         doors_carved += 1
         
     print(f"  [2C-Carve] Carved {doors_carved} topological gaps into the walls for detected doors.")
-    return modified_vectors
+    return modified_vectors, door_cuts
 
 def correct_structure(image, vectors, weights_path="best.pt", is_fast_mode=False):
     """
@@ -434,10 +437,11 @@ def correct_structure(image, vectors, weights_path="best.pt", is_fast_mode=False
     # Phase A: Close small fractures
     vectors_closed = fill_small_gaps(vectors, door_dets)
     
-    # Phase B: Slice actual door gaps cleanly out of the dense vectors
-    final_vectors = carve_doors_out_of_walls(vectors_closed, door_dets)
-
-    return final_vectors, detections
+    # 5. Carve the valid doors out of the vector topology
+    # We now also catch door_cuts to pass up to Babylon.js Phase 6 tracking
+    vectors_phase2c, door_cuts = carve_doors_out_of_walls(vectors_closed, door_dets)
+    
+    return vectors_phase2c, detections, door_cuts
 
 
 if __name__ == "__main__":
@@ -454,8 +458,7 @@ if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = pipeline.load_model_logic("best_cleaner_model_v3.pth", device)
     mask = pipeline.predict_tiled(model, device, cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
-    vectors,_ = pipeline.process_geometry(mask)
-
-    corrected, dets = correct_structure(img, vectors)
+    vectors, _, _ = pipeline.process_geometry(mask)
+    corrected, dets, cuts = correct_structure(img, vectors)
     print(f"\nOriginal: {len(vectors)} vectors → Corrected: {len(corrected)} vectors")
-    print(f"Detections used: {len(dets)}")
+    print(f"Detections used: {len(dets)}, Door cuts: {len(cuts)}")
