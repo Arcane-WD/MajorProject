@@ -29,6 +29,44 @@ The system focuses on **geometric reconstruction**, not surface visualization.
 
 ---
 
+## The Current Working System
+
+Our state-of-the-art methodology leverages lightweight prediction coupled with deep mathematical reconstruction.
+
+### **Models**
+* **U-Net (ResNet-34 backbone):** Customized Version 3. Trained for high-fidelity pixel-wise semantic segmentation of walls.
+* **YOLOv8 Medium:** Trained to detect topological features (doors, sliding doors, windows) and architectural furniture (beds, toilets, sinks, cabinets).
+
+### **Datasets**
+* **Custom Synthesized Raster Set:** Employed dynamic OpenCV morphological augmentation (dilations, erosions) to train the U-Net for bridging semantic gaps.
+* **FloorPlanCAD (Adapted):** Subset of high-quality architectural CAD vectors exported to raster specifically for training the YOLO object detector.
+
+### **Algorithms & Math**
+* **Raster-to-Vector topology:** Generates 1D spatial skeletons from 2D pixel masses.
+* **RDP (Ramer-Douglas-Peucker):** Curve simplification algorithm condensing pixel clouds into distinct vector segments.
+* **PCA (Principal Component Analysis):** Utilized for least-squares regression line-fitting on segmented pixel clouds.
+* **Hann-window blending:** $H(n) = 0.5 \left(1 - \cos\left(\frac{2\pi n}{N-1}\right)\right)$. Utilized to merge segmented $512 \times 512$ tile inferences smoothly back into high-resolution maps.
+* **Bounding Centroids:** Spatial formulas guaranteeing the Babylon.js FPS camera spawns strictly inside the interior topological boundary.
+
+### **Libraries**
+* **AI/ML:** `torch` (PyTorch inference & training), `ultralytics` (YOLO engine).
+* **Computer Vision:** `cv2` (OpenCV morphologies), `skimage.morphology` (skeletonization).
+* **Geometry:** `networkx` (graph traversal), `numpy` (vector math), `trimesh` (3D boolean construction & GLB export).
+* **Frontend:** `streamlit` (UI sandboxing), `Babylon.js` (WebGL interactive gamified navigation layer).
+
+---
+
+## Failed Trials & Deprecated Approaches
+
+Throughout research and scale-up, several approaches were abandoned:
+
+* **Abandoned Models (Zero-Shot SAM):** Initially attempted to use Meta's Segment Anything Model (SAM) alongside the Roboflow API. Zero-shot foundation models completely failed to comprehend arbitrary 2D architecture logic (e.g., standard CAD door swing arcs) and were inherently too slow for single-pass inference.
+* **Abandoned Datasets (Raw FloorPlanCAD):** Training the U-Net on raw CAD vectors yielded brittle inferences. We realized we had to intentionally *degrade* our training data using noise and artifact injections to build a robust model capable of parsing real-world, messy raster images.
+* **Abandoned Algorithms (2D Topological Carves - Scenario B/C):** We initially attempted to mathematically splice wall vectors purely in 2D space before 3D generation. This proved extremely brittle, causing cascading intersection failures on non-orthogonal walls. We pivoted to a 3D generative projection approach where the Python engine safely emits bounding box matrices (`door_metadata`) and Babylon.js constructs the collision dynamics natively.
+* **Abandoned Algorithms (Hough Line Transform):** Standard computer vision heuristic for floorplan mapping. Resulted in highly fragmented, overlapping, and useless lines across thicker wall segments. Abandoned in favor of our hybrid Skeletonization + PCA strategy.
+
+---
+
 ## System Architecture
 
 ```
